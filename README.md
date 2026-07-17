@@ -87,6 +87,7 @@ The script runs through 16 steps:
 | 15 | Firewall rules & health checks |
 | 16 | Output deployment results |
 
+<img width="1167" height="1023" alt="dd3efb30-a0d7-48b5-9ffd-17fd192acb36" src="https://github.com/user-attachments/assets/e1ed0c29-8327-4cec-b51e-735d87b560b9" />
 
 
 ## Node Configuration
@@ -101,6 +102,8 @@ The script runs through 16 steps:
 - **Reality**: Uses `swdist.apple.com` as impersonation target, no real domain/cert required
 - **Vision**: XTLS Vision flow control for high performance
 - **XHTTP**: HTTP/2-based XHTTP transport, supports CDN relay
+
+<img width="1700" height="1318" alt="QQ20260718-030016" src="https://github.com/user-attachments/assets/7e4cfe33-ee01-4f54-b72e-23a9f78da634" />
 
 ## Routing Rules
 
@@ -130,6 +133,7 @@ The generated Clash subscription uses [Loyalsoldier/clash-rules](https://github.
 - **Whitelist mode**: unmatched traffic defaults to proxy (MATCH=Proxy), ensuring all blocked sites go through the proxy
 
 > The subscription URL is served over HTTP on port `10707` by default. For HTTPS, you can put Nginx/Caddy behind with a valid certificate.
+<img width="1689" height="1206" alt="QQ20260718-030043" src="https://github.com/user-attachments/assets/f1577a76-45c3-4e2c-9a34-25d40f909ab4" />
 
 ## Post-Deployment Management
 
