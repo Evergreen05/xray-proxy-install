@@ -87,7 +87,6 @@ The script runs through 16 steps:
 | 15 | Firewall rules & health checks |
 | 16 | Output deployment results |
 
-![Uploading dd3efb30-a0d7-48b5-9ffd-17fd192acb36.png…]()
 
 
 ## Node Configuration
