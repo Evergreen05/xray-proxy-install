@@ -903,8 +903,12 @@ mode: rule
 log-level: info
 external-controller: 127.0.0.1:9090
 
+profile:
+  name: "Proxy-${SERVER_IP}"
+  store-selected: true
+
 proxies:
-  - name: Reality-Fragment
+  - name: "🚀 Reality-Fragment (443)"
     type: vless
     server: ${SERVER_IP}
     port: 443
@@ -923,7 +927,7 @@ proxies:
         interval: "10-50"
     udp: true
 
-  - name: VLESS-TLS
+  - name: "🔒 VLESS-TLS (8443)"
     type: vless
     server: ${SERVER_IP}
     port: 8443
@@ -935,7 +939,7 @@ proxies:
     skip-cert-verify: true
     udp: true
 
-  - name: XHTTP-TLS
+  - name: "🌐 XHTTP-CDN (8880)"
     type: vless
     server: ${SERVER_IP}
     port: 8880
@@ -951,12 +955,29 @@ proxies:
     udp: true
 
 proxy-groups:
-  - name: Proxy
+  - name: "🚀 节点选择"
     type: select
     proxies:
-      - Reality-Fragment
-      - VLESS-TLS
-      - XHTTP-TLS
+      - "♻️ 自动选择"
+      - "🚀 Reality-Fragment (443)"
+      - "🔒 VLESS-TLS (8443)"
+      - "🌐 XHTTP-CDN (8880)"
+      - DIRECT
+
+  - name: "♻️ 自动选择"
+    type: url-test
+    url: http://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+    proxies:
+      - "🚀 Reality-Fragment (443)"
+      - "🔒 VLESS-TLS (8443)"
+      - "🌐 XHTTP-CDN (8880)"
+
+  - name: "🐟 漏网之鱼"
+    type: select
+    proxies:
+      - "🚀 节点选择"
       - DIRECT
 
 # ============================================
@@ -1064,17 +1085,17 @@ rules:
   - DOMAIN,yacd.haishan.me,DIRECT
   - RULE-SET,private,DIRECT
   - RULE-SET,reject,REJECT
-  - RULE-SET,icloud,Proxy
-  - RULE-SET,apple,Proxy
-  - RULE-SET,google,Proxy
-  - RULE-SET,proxy,Proxy
+  - RULE-SET,icloud,"🚀 节点选择"
+  - RULE-SET,apple,"🚀 节点选择"
+  - RULE-SET,google,"🚀 节点选择"
+  - RULE-SET,proxy,"🚀 节点选择"
   - RULE-SET,direct,DIRECT
   - RULE-SET,lancidr,DIRECT
   - RULE-SET,cncidr,DIRECT
-  - RULE-SET,telegramcidr,Proxy
+  - RULE-SET,telegramcidr,"🚀 节点选择"
   - GEOIP,LAN,DIRECT
   - GEOIP,CN,DIRECT
-  - MATCH,Proxy
+  - MATCH,"🐟 漏网之鱼"
 CLASHEOF
 add_rollback "rm -f '$WEB_ROOT/clash.yaml'"
 
@@ -1116,7 +1137,9 @@ server {
         try_files /clash.yaml =404;
         default_type text/yaml;
         charset utf-8;
-        add_header Content-Disposition 'attachment; filename="clash.yaml"' always;
+        add_header Content-Disposition 'attachment; filename="Proxy-${SERVER_IP}.yaml"' always;
+        add_header Profile-Update-Interval "86400" always;
+        add_header Subscription-Userinfo "upload=0; download=0; total=10737418240; expire=0" always;
     }
 
     # 拒绝所有其他请求
