@@ -228,6 +228,25 @@ detect_distro
 # ============================================
 step "端口冲突检测与 IP 获取"
 
+# 前置检查：确保 curl 可用（后续 IP 获取和 Xray 安装依赖）
+if ! command -v curl &>/dev/null; then
+    log "curl 未安装，尝试自动安装..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq curl
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q curl
+    elif command -v yum &>/dev/null; then
+        yum install -y -q curl
+    elif command -v pacman &>/dev/null; then
+        pacman -S --noconfirm curl
+    elif command -v zypper &>/dev/null; then
+        zypper install -y -n curl
+    elif command -v apk &>/dev/null; then
+        apk add --no-cache curl
+    fi
+    command -v curl &>/dev/null || error "curl 安装失败，请手动安装后重试"
+fi
+
 PORT_CONFLICT=0
 for port in 443 8443 8880 10707; do
     if check_port "$port"; then
@@ -268,7 +287,7 @@ echo -e "${GREEN}Swap 大小:${NC} ${TOTAL_SWAP_MB} MB"
 echo ""
 
 if [ "$TOTAL_SWAP_MB" -ge 2000 ]; then
-    log "Swap 大小符合要求 (${TOTAL_SWAP_MB} MB >= 2048 MB)"
+    log "Swap 大小符合要求 (${TOTAL_SWAP_MB} MB >= 2000 MB)"
 else
     warn "Swap 大小不足 (${TOTAL_SWAP_MB} MB < 2048 MB)，低内存服务器建议配置 2GB Swap"
     echo ""
@@ -360,7 +379,7 @@ if command -v xray &>/dev/null && [ -f /usr/local/etc/xray/config.json ]; then
     warn "检测到已安装 Xray，将进行覆盖安装"
     service_manage stop xray 2>/dev/null || true
     sleep 1
-    pkill -f "xray" 2>/dev/null || true
+    pkill -f "/usr/local/bin/xray" 2>/dev/null || true
 fi
 
 for _svc in nginx apache2 httpd caddy; do
@@ -370,7 +389,8 @@ for _svc in nginx apache2 httpd caddy; do
 done
 sleep 1
 pkill -f "nginx" 2>/dev/null || true
-pkill -f "apache2|httpd" 2>/dev/null || true
+pkill -f "apache2" 2>/dev/null || true
+pkill -f "httpd" 2>/dev/null || true
 
 # 清理旧 Nginx 配置残留
 rm -f /etc/nginx/sites-enabled/proxy-sub-secure 2>/dev/null || true
@@ -444,7 +464,7 @@ cat > /etc/sysctl.d/99-proxy-optimized.conf << 'SYSCTL'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 
-# --- TCP 缓冲区 (8MB，平衡内存与性能) ---
+# --- TCP 缓冲区 (4MB，平衡内存与性能) ---
 net.core.rmem_default=262144
 net.core.wmem_default=262144
 net.core.rmem_max=4194304
@@ -486,6 +506,7 @@ net.ipv4.tcp_max_syn_backlog=8192
 
 # --- SYN flood 防护 ---
 net.ipv4.tcp_syncookies=1
+net.ipv4.tcp_rfc1337=1
 
 # --- 本地端口范围扩大 ---
 net.ipv4.ip_local_port_range=1024 65535
@@ -829,23 +850,8 @@ cat > /usr/local/etc/xray/config.json << EOF
         }
     ],
     "routing": {
-        "rules": [
-            {
-                "type": "field",
-                "inboundTag": [
-                    "vless-reality",
-                    "vless-tls"
-                ],
-                "outboundTag": "direct"
-            },
-            {
-                "type": "field",
-                "inboundTag": [
-                    "vless-xhttp"
-                ],
-                "outboundTag": "direct"
-            }
-        ]
+        "domainStrategy": "AsIs",
+        "rules": []
     }
 }
 EOF
@@ -898,7 +904,7 @@ mkdir -p "$WEB_ROOT"
 
 cat > "$WEB_ROOT/clash.yaml" << CLASHEOF
 mixed-port: 7890
-allow-lan: true
+allow-lan: false
 mode: rule
 log-level: info
 external-controller: 127.0.0.1:9090
@@ -1068,6 +1074,8 @@ rules:
   - RULE-SET,apple,Proxy
   - RULE-SET,google,Proxy
   - RULE-SET,proxy,Proxy
+  - RULE-SET,gfw,Proxy
+  - RULE-SET,tld-not-cn,Proxy
   - RULE-SET,direct,DIRECT
   - RULE-SET,lancidr,DIRECT
   - RULE-SET,cncidr,DIRECT
