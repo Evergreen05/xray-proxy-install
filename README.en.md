@@ -18,7 +18,7 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 - **Auto BBR optimization**: Dynamic TCP buffer calculation based on available memory
 - **Auto Swap**: Automatically configures 2GB Swap on low-memory servers (<1GB)
 - **Clash subscription**: Auto-generates Clash Meta format subscription via Nginx HTTP endpoint
-- **Smart routing rules**: Powered by [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) (⭐ ~27.6k), auto-updated daily with precise geo-routing
+- **Smart routing rules**: Powered by [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) (⭐ ~27.6k), auto-updated daily, whitelist mode with precise geo-routing
 - **Auto certificates**: ECC P-256 self-signed certs with secure permission handling
 - **Cross-platform**: Supports apt/dnf/yum/pacman/zypper/apk (6 package managers)
 - **Cross-init**: Supports systemd/sysvinit/OpenRC (3 service managers)
@@ -146,8 +146,6 @@ The generated Clash subscription uses [Loyalsoldier/clash-rules](https://github.
 | `lancidr` | LAN CIDR ranges | DIRECT |
 | `cncidr` | China CIDR ranges | DIRECT |
 | `proxy` | Foreign/blocked domains | Proxy |
-| `gfw` | GFW-list domains | Proxy |
-| `tld-not-cn` | Non-Chinese TLDs | Proxy |
 | `apple` | Apple services | Proxy |
 | `google` | Google services | Proxy |
 | `icloud` | iCloud services | Proxy |
@@ -207,14 +205,14 @@ Recommended clients:
 The script auto-configures:
 
 - **BBR congestion control** + `fq` qdisc
-- **TCP buffers**: Dynamically calculated, 8MB max (optimized for 1GB RAM)
+- **TCP buffers**: Dynamically calculated, 4MB max (balanced for memory and performance)
 - **TCP Fast Open**: Enabled
 - **MTU probing**: Automatic PMTU discovery
 - **File descriptors**: System-level 1,048,576; service-level 131,072
 - **Connection queues**: somaxconn=8192, tcp_max_syn_backlog=8192
 - **Swap optimization**: swappiness=10, vfs_cache_pressure=50
 - **Timestamps/SACK/Window scaling**: All enabled
-- **Security hardening**: Source routing/redirects disabled, SYN cookies enabled
+- **Security hardening**: Source routing/redirects disabled, SYN cookies & RFC 1337 protection enabled
 
 ## Dependencies
 

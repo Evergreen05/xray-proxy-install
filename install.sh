@@ -28,7 +28,6 @@ done
 log() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 
 # 进度提示
 STEP_TOTAL=14
@@ -289,7 +288,7 @@ echo ""
 if [ "$TOTAL_SWAP_MB" -ge 2000 ]; then
     log "Swap 大小符合要求 (${TOTAL_SWAP_MB} MB >= 2000 MB)"
 else
-    warn "Swap 大小不足 (${TOTAL_SWAP_MB} MB < 2048 MB)，低内存服务器建议配置 2GB Swap"
+    warn "Swap 大小不足 (${TOTAL_SWAP_MB} MB < 2000 MB)，低内存服务器建议配置 2GB Swap"
     echo ""
     echo -e "${YELLOW}是否配置 2GB Swap 虚拟内存？${NC}"
     echo -e "  ${GREEN}y${NC} - 配置（推荐 1G 内存服务器）"
@@ -399,8 +398,8 @@ rm -f /etc/nginx/sites-enabled/proxy-sub 2>/dev/null || true
 rm -f /etc/nginx/conf.d/proxy-sub.conf 2>/dev/null || true
 if [ -d /etc/nginx/sites-enabled ]; then
     for link in /etc/nginx/sites-enabled/*; do
+        [ -L "$link" ] && [ ! -e "$link" ] && rm -f "$link" && continue
         [ -e "$link" ] || continue
-        [ -L "$link" ] && [ ! -e "$link" ] && rm -f "$link"
     done
 fi
 
@@ -617,7 +616,6 @@ fi
 if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
     warn "xray x25519 提取失败，尝试 openssl 生成密钥..."
     if command -v openssl &>/dev/null; then
-        OPENSSL_VER=$(openssl version 2>/dev/null | awk '{print $2}')
         # OpenSSL 1.1.0+ 支持 x25519
         TMP_PRIV_DER=$(openssl genpkey -algorithm x25519 -outform DER 2>/dev/null | base64 -w 0 2>/dev/null)
         if [ -n "$TMP_PRIV_DER" ]; then
@@ -871,7 +869,6 @@ openssl req -new -x509 -days 3650 -key /etc/xray/server.key \
 # 公钥可读
 chmod 644 /etc/xray/server.crt
 # 私钥：根据 xray 运行用户设置权限，避免 644 导致任意用户可读私钥
-CERT_PERM_OK=1
 if [ "$XRAY_USER" = "root" ]; then
     chmod 600 /etc/xray/server.key
 else
@@ -884,7 +881,6 @@ else
         XRAY_USER="root"
         XRAY_GROUP="root"
         chmod 600 /etc/xray/server.key
-        CERT_PERM_OK=0
     fi
 fi
 add_rollback "rm -f /etc/xray/server.crt /etc/xray/server.key"
