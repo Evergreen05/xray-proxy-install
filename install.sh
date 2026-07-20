@@ -1019,20 +1019,6 @@ rule-providers:
     path: ./ruleset/private.yaml
     interval: 86400
 
-  gfw:
-    type: http
-    behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/gfw.txt"
-    path: ./ruleset/gfw.yaml
-    interval: 86400
-
-  tld-not-cn:
-    type: http
-    behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/tld-not-cn.txt"
-    path: ./ruleset/tld-not-cn.yaml
-    interval: 86400
-
   telegramcidr:
     type: http
     behavior: ipcidr
@@ -1074,8 +1060,6 @@ rules:
   - RULE-SET,apple,Proxy
   - RULE-SET,google,Proxy
   - RULE-SET,proxy,Proxy
-  - RULE-SET,gfw,Proxy
-  - RULE-SET,tld-not-cn,Proxy
   - RULE-SET,direct,DIRECT
   - RULE-SET,lancidr,DIRECT
   - RULE-SET,cncidr,DIRECT
