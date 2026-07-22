@@ -1332,7 +1332,7 @@ server {
         try_files /clash.yaml =404;
         default_type text/yaml;
         charset utf-8;
-        add_header Content-Disposition 'attachment; filename="clash.yaml"' always;
+        add_header Content-Disposition 'attachment; filename=clash.yaml' always;
     }
 
     # 拒绝所有其他请求
