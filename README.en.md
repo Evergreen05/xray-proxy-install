@@ -14,18 +14,24 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 
 ## Features
 
-- **Multi-protocol nodes**: Reality+Vision+Fragment (primary/anti-detection), VLESS+TLS (backup), XHTTP+TLS (CDN-compatible)
+- **Multi-protocol nodes**: Reality+Vision+Fragment (primary/anti-detection), VLESS+TLS (backup), XHTTP+Reality (CDN-compatible)
+- **Multi-CDN camouflage**: 5 fronting domains (Apple SWDist/iTunes/Update, Microsoft CDN, Bing) × 3 network types = 15 nodes. Node names show the CDN in use; each Reality inbound has its own port and dest
+- **DNS optimization**: Client-side fake-ip + fallback-filter anti-pollution; server-side Xray built-in DoH resolution
 - **Auto BBR optimization**: Dynamic TCP buffer calculation based on available memory
 - **Auto Swap**: Automatically configures 2GB Swap on low-memory servers (<1GB)
 - **Clash subscription**: Auto-generates Clash Meta format subscription via Nginx HTTP endpoint
 - **Smart routing rules**: Powered by [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) (⭐ ~27.6k), auto-updated daily, whitelist mode with precise geo-routing
-- **Auto certificates**: ECC P-256 self-signed certs with secure permission handling
+- **Auto certificates**: ECC P-256 self-signed certs (SAN covers all camouflage domains) with secure permission handling
+- **Pinned version**: Xray-core installed at a fixed version (v26.3.27), auto-fallback to latest on failure
+- **Config pre-check**: jq JSON validation + `xray run -test` semantic check before starting services
+- **Clock detection**: Checks NTP sync before deployment (Reality handshake is time-sensitive)
+- **Self-healing start**: Auto-repairs certificate permissions and retries if Xray fails to start
 - **Cross-platform**: Supports apt/dnf/yum/pacman/zypper/apk (6 package managers)
 - **Cross-init**: Supports systemd/sysvinit/OpenRC (3 service managers)
-- **Auto firewall**: Configures ufw/firewalld/iptables automatically
+- **Auto firewall**: Configures ufw/firewalld/iptables automatically (with rule persistence)
 - **SELinux compatible**: Auto-sets httpd_sys_content_t on CentOS/RHEL/Anolis
-- **Auto rollback**: Any failure triggers automatic rollback of all changes
-- **Management CLI**: `proxy-manager` command for post-deploy administration
+- **Auto rollback**: Any failure triggers automatic rollback of all changes (restores previous config on overwrite installs)
+- **Management CLI**: `proxy-manager` command for post-deploy administration (includes config test & subscription URL query)
 - **Key fallback**: 5-mode X25519 key extraction with OpenSSL fallback
 
 ## Supported Operating Systems
@@ -55,7 +61,7 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 - A Linux server with **root** access
 - Supported OS: Ubuntu 16.04+, Debian 9+, CentOS 7+, RHEL 7+, Rocky/Alma/Anolis 8+, Fedora 29+, openSUSE, Arch, Alpine
 - Kernel 4.9+ recommended (for BBR)
-- Open ports in your cloud security group: **443**, **8443**, **8880**, **10707**
+- Open ports in your cloud security group: **443**, **1443**, **2443**, **3443**, **4443**, **8443**, **8880**, **10707**
 - `curl` or `wget` installed (most systems have them pre-installed)
 
 ### Option 1: One-Click Install (Recommended)
@@ -100,39 +106,50 @@ bash install.sh
 
 ## Installation Process
 
-The script runs through 16 steps:
+The script runs through **14 steps** (plus a pre-check and final output):
 
 | Step | Description |
 |------|-------------|
-| 1 | Root privilege check & distro detection |
-| 2 | Port conflict detection & public IP acquisition |
-| 3 | Memory check & Swap configuration |
-| 4 | Environment cleanup (stop old services, remove stale configs) |
-| 5 | System update & dependency installation |
-| 6 | Network kernel optimization (BBR/TCP/Files) |
-| 7 | Install Xray-core |
-| 8 | Generate UUID, X25519 keypair, Short ID |
-| 9 | Generate Xray config (3 inbound nodes) |
-| 10 | Generate self-signed ECC certificates with secure permissions |
-| 11 | Generate Clash subscription config |
-| 12 | Configure Nginx subscription endpoint |
-| 13 | Configure systemd limits & start services |
-| 14 | Create `proxy-manager` CLI tool |
-| 15 | Firewall rules & health checks |
-| 16 | Output deployment results |
+| Pre | Root privilege check & distro detection |
+| 1 | Acquire public IP + NTP clock sync check |
+| 2 | Memory check & Swap configuration |
+| 3 | Environment check & port conflict detection (stop old services, cleanup, backup old config) |
+| 4 | System update & dependency installation |
+| 5 | Network kernel optimization (BBR/TCP/Files) |
+| 6 | Install Xray-core (pinned version, fallback to latest) |
+| 7 | Generate UUID, X25519 keypair, Short ID, subscription path |
+| 8 | Generate Xray config (7 inbounds: 5 Reality + TLS + XHTTP) + config pre-check |
+| 9 | Generate self-signed ECC certificates (SAN covers all camouflage domains) with secure permissions |
+| 10 | Generate Clash subscription config (15 nodes + DNS + routing rules) |
+| 11 | Configure Nginx subscription endpoint |
+| 12 | Configure systemd limits & start services (with auto cert-permission repair) |
+| 13 | Create `proxy-manager` CLI tool |
+| 14 | Firewall rules & health checks |
+| Output | Print deployment results, node list, subscription URL |
 
 ## Node Configuration
 
-| Node | Port | Protocol | Transport | Encryption | Purpose |
+Each camouflage CDN domain × 3 network types (Reality / TLS / XHTTP) forms a node — **15 nodes** in total. Node names follow `<Type>-<CDN-Label>` (e.g. `Reality-Apple-SWDIST`), so the CDN in use is visible right after import.
+
+| Camouflage CDN | Node Label | Reality Port | dest |
+|----------------|-----------|--------------|------|
+| swdist.apple.com | Apple-SWDIST | 443 | swdist.apple.com:443 |
+| iosapps.itunes.apple.com | Apple-iTunes | 1443 | iosapps.itunes.apple.com:443 |
+| updates.cdn-apple.com | Apple-Update | 2443 | updates.cdn-apple.com:443 |
+| cdn-dynmedia-1.microsoft.com | Microsoft-CDN | 3443 | cdn-dynmedia-1.microsoft.com:443 |
+| www.bing.com | Bing | 4443 | www.bing.com:443 |
+
+| Type | Port | Protocol | Transport | Encryption | Purpose |
 |------|------|----------|-----------|------------|---------|
-| Node 1 | 443 | VLESS | TCP + Vision | Reality | Primary, anti-GFW detection, Fragment |
-| Node 2 | 8443 | VLESS | TCP + Vision | TLS (self-signed) | Backup |
-| Node 3 | 8880 | VLESS | XHTTP | TLS (self-signed) | CDN compatible |
+| Reality | 443/1443/2443/3443/4443 | VLESS | TCP + Vision | Reality | Primary, anti-detection, Fragment |
+| TLS | 8443 | VLESS | TCP + Vision | TLS (self-signed) | Backup, SNI = CDN domain |
+| XHTTP | 8880 | VLESS | XHTTP | Reality | CDN compatible, Reality security layer, SNI = CDN domain |
 
 - **Fragment**: TLS Client Hello fragmentation (100-200 bytes, 10-50ms interval) for enhanced anti-detection
-- **Reality**: Uses `swdist.apple.com` as impersonation target, no real domain/cert required
+- **Reality**: Each domain gets its own inbound, port and dest — probes receive the real certificate of the corresponding CDN; no own domain/cert required
 - **Vision**: XTLS Vision flow control for high performance
-- **XHTTP**: HTTP/2-based XHTTP transport, supports CDN relay
+- **XHTTP**: HTTP/2-based XHTTP transport + Reality security layer (no self-signed cert needed), supports CDN relay
+- **Proxy group**: Proxy → Reality / TLS / XHTTP sub-groups, manual `select` only — no url-test or fallback
 
 ## Routing Rules
 
@@ -161,13 +178,31 @@ The generated Clash subscription uses [Loyalsoldier/clash-rules](https://github.
 
 > The subscription URL is served over HTTP on port `10707` by default. For HTTPS, you can put Nginx/Caddy behind with a valid certificate.
 
+## DNS Optimization
+
+### Client-side (Clash Meta / mihomo)
+
+- **fake-ip mode** (198.18.0.1/16): Faster connection setup; avoids connecting to poisoned IPs
+- **Domestic nameservers**: 223.5.5.5 / 119.29.29.29 / 114.114.114.114 (plain UDP, fast resolution)
+- **Fallback**: 1.1.1.1 / 8.8.8.8 (foreign DNS)
+- **fallback-filter**: GeoIP CN + geosite:gfw + 240.0.0.0/4 + specified domains (google/facebook/youtube) — blocked domains forced to fallback
+- **respect-rules**: DNS queries follow the same routing rules as traffic
+- **proxy-server-nameserver**: Proxy node domain resolution uses domestic DNS to avoid loops
+
+### Server-side (Xray)
+
+- Xray built-in DNS: `https://1.1.1.1/dns-query` + `https://dns.google/dns-query` + 8.8.8.8
+- Freedom outbound `domainStrategy: UseIPv4` — immune to broken VPS resolvers or IPv6 fallback issues
+
 ## Post-Deployment Management
 
 After deployment, use the `proxy-manager` command:
 
 ```bash
 proxy-manager info       # Server info, subscription URL, node parameters
+proxy-manager sub        # Print subscription URL only (easy to copy)
 proxy-manager status     # Xray & Nginx service status, port monitoring
+proxy-manager test       # Test Xray & Nginx config validity
 proxy-manager start      # Start all services
 proxy-manager stop       # Stop all services
 proxy-manager restart    # Restart all services
@@ -175,7 +210,6 @@ proxy-manager config     # View Xray config (JSON formatted)
 proxy-manager rules      # View Clash rules file path
 proxy-manager log        # View last 50 lines of Xray logs
 proxy-manager uninstall  # Completely uninstall (configs, certs, rules)
-proxy-manager help       # Show help
 ```
 
 ## Required Ports
@@ -184,9 +218,13 @@ Ensure these ports are open in your cloud security group/firewall before deploym
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 443 | TCP | VLESS Reality primary node |
-| 8443 | TCP | VLESS TLS backup node |
-| 8880 | TCP | VLESS XHTTP CDN node |
+| 443 | TCP | Reality node - Apple-SWDIST (swdist.apple.com) |
+| 1443 | TCP | Reality node - Apple-iTunes (iosapps.itunes.apple.com) |
+| 2443 | TCP | Reality node - Apple-Update (updates.cdn-apple.com) |
+| 3443 | TCP | Reality node - Microsoft-CDN (cdn-dynmedia-1.microsoft.com) |
+| 4443 | TCP | Reality node - Bing (www.bing.com) |
+| 8443 | TCP | VLESS TLS backup nodes (shared by all 5 CDNs) |
+| 8880 | TCP | VLESS XHTTP CDN nodes (shared by all 5 CDNs) |
 | 10707 | TCP | Clash subscription HTTP endpoint (configurable) |
 
 ## Client Setup
@@ -198,7 +236,10 @@ Recommended clients:
 - **Shadowrocket** (iOS): Supports Clash subscription and VLESS
 - **v2rayNG** (Android): Supports VLESS and subscription import
 
-> **Note**: Node 2 (8443) and Node 3 (8880) use self-signed certificates. Enable **skip-cert-verify** in your client.
+> **Note**:
+> - TLS (8443) nodes use self-signed certificates — enable **skip-cert-verify** in your client
+> - XHTTP (8880) nodes use the Reality security layer — no skip-cert-verify needed, but requires a recent mihomo/Clash Meta kernel (≥ 2024.1)
+> - Reality (443/1443/2443/3443/4443) nodes require no extra settings
 
 ## System Tuning Parameters
 
@@ -212,7 +253,7 @@ The script auto-configures:
 - **Connection queues**: somaxconn=8192, tcp_max_syn_backlog=8192
 - **Swap optimization**: swappiness=10, vfs_cache_pressure=50
 - **Timestamps/SACK/Window scaling**: All enabled
-- **Security hardening**: Source routing/redirects disabled, SYN cookies & RFC 1337 protection enabled
+- **Security hardening**: Source routing/redirects disabled, SYN cookies enabled
 
 ## Dependencies
 
@@ -230,11 +271,13 @@ Auto-installed packages:
 
 ## Security
 
-- **Private key permissions**: 600 when Xray runs as root; 640 + chown for non-root
-- **Subscription endpoint**: Random 16-character path, only allows specific path, others return 404
+- **Private key permissions**: 600 when Xray runs as root; 640 + chown for non-root; auto-repairs permissions and retries on startup failure
+- **Subscription endpoint**: Random 16-char hex path, only allows specific path, others return 404; access_log disabled for privacy
 - **Security headers**: X-Content-Type-Options, X-Frame-Options, X-XSS-Protection
 - **SELinux**: Auto-sets file context to prevent 403 Forbidden
 - **No hardcoded secrets**: All keys/UUIDs generated randomly at deploy time
+- **Clock check**: Verifies NTP sync before deployment (Reality handshake is time-sensitive)
+- **Config pre-check**: jq JSON validation + `xray run -test` semantic check; aborts and rolls back on failure
 
 ## Troubleshooting
 
@@ -299,6 +342,7 @@ nginx -t                                  # Nginx config test
 | Clash subscription | `/usr/share/nginx/html/clash.yaml` (or `/var/www/html/`) |
 | Nginx config | `/etc/nginx/conf.d/proxy-sub.conf` |
 | Manager CLI | `/usr/local/bin/proxy-manager` |
+| Manager CLI env | `/etc/proxy-manager.env` |
 | Sysctl config | `/etc/sysctl.d/99-proxy-optimized.conf` |
 | Limits config | `/etc/security/limits.d/99-proxy.conf` |
 | Systemd limits | `/etc/systemd/system/xray.service.d/limits.conf` |
