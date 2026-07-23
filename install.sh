@@ -4,10 +4,9 @@ set -e -o pipefail
 export LC_ALL=C
 
 # ============================================
-# Xray Proxy Install Script v4.3
+# Xray Proxy Install Script v4.4
 # Protocol: VLESS + Reality + Vision + Fragment
-# Multi-CDN: 5 个伪装域名 x Reality/TLS/XHTTP 三种网络类型 = 15 节点
-# 订阅分组: Proxy -> Reality / TLS / XHTTP 三组，每组 5 个 CDN 节点
+# 伪装策略: 单域名单端口 Reality（避免一机多站探测特征）+ TLS/XHTTP 备用组
 # Optimization: BBR / TCP / Subscription endpoint / Auto Swap / DNS
 # Compatibility: apt/dnf/yum 已验证; pacman/zypper/apk 理论支持（未经充分测试，官方 Xray 安装器依赖 systemd）
 # GitHub: https://github.com/Evergreen05/xray-proxy-install
@@ -77,36 +76,51 @@ add_rollback() {
 # ============================================
 # 部署参数（单一事实源：端口/域名/节点名全部由此派生）
 # 格式: 域名|Reality端口|节点标签
-# 每个 CDN 域名 x Reality/TLS/XHTTP 三种网络类型各生成一个节点
+#
+# 伪装域名(dest)选型原则（Reality 社区共识）：
+#   1. 单域名单端口——一机多端口伪装多个不同公司站点是极强的主动探测特征
+#   2. 避开 bing.com / apple 下载 CDN 等被教程用滥的目标（特征库已收录）
+#   3. 必须支持 TLS1.3 + h2 + X25519，全球解析行为一致（非地理调度）
+#   4. 部署时自动预检（见 step 7），失败自动从备用池替补
+# 如需多域名可按格式继续添加行（端口递增），但强烈建议保持单域名
 # ============================================
 REALITY_CDNS=(
-    "swdist.apple.com|443|Apple-SWDIST"
-    "iosapps.itunes.apple.com|1443|Apple-iTunes"
-    "updates.cdn-apple.com|2443|Apple-Update"
-    "cdn-dynmedia-1.microsoft.com|3443|Microsoft-CDN"
-    "www.bing.com|4443|Bing"
+    "cdn-dynmedia-1.microsoft.com|443|Microsoft-CDN"
+)
+
+# dest 预检失败时的备用候选（域名|标签），按序尝试
+DEST_FALLBACKS=(
+    "updates.cdn-apple.com|Apple-Update"
+    "iosapps.itunes.apple.com|Apple-iTunes"
+    "download-porter.hoyoverse.com|Hoyoverse"
+    "osxapps.itunes.apple.com|Apple-macOS"
+    "music.apple.com|Apple-Music"
+    "tv.apple.com|Apple-TV"
+    "www.mi.com|Xiaomi"
+    "buylite.music.apple.com|Apple-Music-Lite"
+    "www.lamer.com.hk|LaMer"
 )
 
 # 固定 Xray 版本，避免上游输出格式变化导致部署不可复现；失败时自动回退到最新版
 XRAY_VERSION="v26.3.27"
 XRAY_INSTALL_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 
-# 代理端口列表（Reality 端口按 REALITY_CDNS 顺序派生 + TLS 8443 + XHTTP 8880）
-PROXY_PORTS=()
-REALITY_PORTS=()
-for entry in "${REALITY_CDNS[@]}"; do
-    _rest="${entry#*|}"
-    PROXY_PORTS+=("${_rest%%|*}")
-    REALITY_PORTS+=("${_rest%%|*}")
-done
-PROXY_PORTS+=(8443 8880)
-
-# 节点标签列表（供 proxy-manager 动态生成节点清单）
-CDN_LABELS=""
-for entry in "${REALITY_CDNS[@]}"; do
-    CDN_LABELS+="${entry##*|} "
-done
-CDN_LABELS="${CDN_LABELS% }"
+# 从 REALITY_CDNS 派生端口列表与节点标签（step 7 预检替换 dest 后会重新调用）
+rebuild_derived_vars() {
+    PROXY_PORTS=()
+    REALITY_PORTS=()
+    CDN_LABELS=""
+    local _rest
+    for entry in "${REALITY_CDNS[@]}"; do
+        _rest="${entry#*|}"
+        PROXY_PORTS+=("${_rest%%|*}")
+        REALITY_PORTS+=("${_rest%%|*}")
+        CDN_LABELS+="${entry##*|} "
+    done
+    PROXY_PORTS+=(8443 8880)
+    CDN_LABELS="${CDN_LABELS% }"
+}
+rebuild_derived_vars
 
 # 订阅端点
 SUB_PORT=10707
@@ -730,7 +744,47 @@ SUB_PATH=$(openssl rand -hex 8 2>/dev/null || true)
 [ -z "$SUB_PATH" ] && SUB_PATH=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -dc 'a-f0-9' | head -c 16 || true)
 [ -z "$SUB_PATH" ] && error "订阅路径生成失败"
 
-# 伪装 CDN 域名池 REALITY_CDNS 与端口列表 PROXY_PORTS 已在脚本头部统一定义
+# ============================================
+# Reality 伪装目标(dest)预检：必须支持 TLS1.3 + h2(ALPN)
+# 不可用的域名直接剔除；全部失败时从备用池自动替补；
+# 仍失败则恢复默认并告警（可能是服务器出网受限，客户端侧未必不可用），不阻断部署
+# ============================================
+check_reality_dest() {
+    local domain="$1" out
+    out=$(timeout 12 openssl s_client -connect "${domain}:443" -servername "${domain}" -tls1_3 -alpn h2 </dev/null 2>/dev/null || true)
+    echo "$out" | grep -q "ALPN protocol: h2" && echo "$out" | grep -q "TLSv1.3"
+}
+
+log "预检 Reality 伪装目标 (TLS1.3 + h2)..."
+OK_CDNS=()
+for entry in "${REALITY_CDNS[@]}"; do
+    _d="${entry%%|*}"
+    if check_reality_dest "$_d"; then
+        log "  ${_d}: 可用"
+        OK_CDNS+=("$entry")
+    else
+        warn "  ${_d}: 不可用，已剔除（不支持 h2/TLS1.3 或无法访问）"
+    fi
+done
+REALITY_CDNS=("${OK_CDNS[@]}")
+
+if [ ${#REALITY_CDNS[@]} -eq 0 ]; then
+    for fb in "${DEST_FALLBACKS[@]}"; do
+        _d="${fb%%|*}"; _t="${fb#*|}"
+        if check_reality_dest "$_d"; then
+            warn "主伪装目标不可用，自动替换为: ${_d}"
+            REALITY_CDNS=("${_d}|443|${_t}")
+            break
+        fi
+    done
+fi
+if [ ${#REALITY_CDNS[@]} -eq 0 ]; then
+    warn "所有伪装目标均不可用（可能是服务器出网受限），继续部署，但 Reality 节点可能无法握手"
+    REALITY_CDNS=("${DEST_FALLBACKS[0]%%|*}|443|${DEST_FALLBACKS[0]#*|}")
+fi
+rebuild_derived_vars
+
+# 伪装域名池 REALITY_CDNS 与端口列表 PROXY_PORTS 已在脚本头部统一定义（预检后已重建）
 log "UUID: ${UUID}"
 log "公钥: ${PUBLIC_KEY}"
 log "伪装 CDN: ${#REALITY_CDNS[@]} 个域名 x 3 种网络类型 = $(( ${#REALITY_CDNS[@]} * 3 )) 个节点"
@@ -1435,7 +1489,7 @@ ENVEOF
 
 cat > /usr/local/bin/proxy-manager << 'MGRSCRIPT'
 #!/bin/bash
-# Xray Proxy Manager v4.3
+# Xray Proxy Manager v4.4
 # https://github.com/Evergreen05/xray-proxy-install
 
 RED='\033[0;31m'
@@ -1674,7 +1728,7 @@ case "$1" in
         echo -e "${GREEN}卸载完成${NC}"
         ;;
     *)
-        echo -e "${BLUE}Xray Proxy Manager v4.3${NC}"
+        echo -e "${BLUE}Xray Proxy Manager v4.4${NC}"
         echo -e "GitHub: https://github.com/Evergreen05/xray-proxy-install"
         echo ""
         echo "用法: proxy-manager <命令>"

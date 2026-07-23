@@ -15,7 +15,8 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 ## Features
 
 - **Multi-protocol nodes**: Reality+Vision+Fragment (primary/anti-detection), VLESS+TLS (backup), XHTTP+Reality (CDN-compatible)
-- **Multi-CDN camouflage**: 5 fronting domains (Apple SWDist/iTunes/Update, Microsoft CDN, Bing) × 3 network types = 15 nodes. Node names show the CDN in use; each Reality inbound has its own port and dest
+- **Single-domain, single-port Reality**: Default fronting target is `cdn-dynmedia-1.microsoft.com:443`. The server only exposes one real Microsoft dynamic media CDN certificate on 443, avoiding the strong active-probing signature of multi-port/multi-site setups
+- **Dest preflight at deploy time**: Step 7 uses `openssl s_client -tls1_3 -alpn h2` to verify the target. Failing domains are dropped; if all fail, the script auto-falls back through the backup pool. If the pool also fails, it warns and continues without blocking deployment
 - **DNS optimization**: Client-side fake-ip + fallback-filter anti-pollution; server-side Xray built-in DoH resolution
 - **Auto BBR optimization**: Dynamic TCP buffer calculation based on available memory
 - **Auto Swap**: Automatically configures 2GB Swap on low-memory servers (<1GB)
@@ -61,7 +62,7 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 - A Linux server with **root** access
 - Supported OS: Ubuntu 16.04+, Debian 9+, CentOS 7+, RHEL 7+, Rocky/Alma/Anolis 8+, Fedora 29+, openSUSE, Arch, Alpine
 - Kernel 4.9+ recommended (for BBR)
-- Open ports in your cloud security group: **443**, **1443**, **2443**, **3443**, **4443**, **8443**, **8880**, **10707**
+- Open ports in your cloud security group: **443**, **8443**, **8880**, **10707**
 - `curl` or `wget` installed (most systems have them pre-installed)
 
 ### Option 1: One-Click Install (Recommended)
@@ -117,10 +118,10 @@ The script runs through **14 steps** (plus a pre-check and final output):
 | 4 | System update & dependency installation |
 | 5 | Network kernel optimization (BBR/TCP/Files) |
 | 6 | Install Xray-core (pinned version, fallback to latest) |
-| 7 | Generate UUID, X25519 keypair, Short ID, subscription path |
-| 8 | Generate Xray config (7 inbounds: 5 Reality + TLS + XHTTP) + config pre-check |
-| 9 | Generate self-signed ECC certificates (SAN covers all camouflage domains) with secure permissions |
-| 10 | Generate Clash subscription config (15 nodes + DNS + routing rules) |
+| 7 | Generate UUID, X25519 keypair, Short ID, subscription path; **preflight Reality dest (TLS1.3 + h2), auto-fallback to backup pool on failure** |
+| 8 | Generate Xray config (3 inbounds: Reality + TLS + XHTTP) + config pre-check |
+| 9 | Generate self-signed ECC certificates (SAN covers camouflage domains) with secure permissions |
+| 10 | Generate Clash subscription config (3 nodes + DNS + routing rules) |
 | 11 | Configure Nginx subscription endpoint |
 | 12 | Configure systemd limits & start services (with auto cert-permission repair) |
 | 13 | Create `proxy-manager` CLI tool |
@@ -129,27 +130,45 @@ The script runs through **14 steps** (plus a pre-check and final output):
 
 ## Node Configuration
 
-Each camouflage CDN domain × 3 network types (Reality / TLS / XHTTP) forms a node — **15 nodes** in total. Node names follow `<Type>-<CDN-Label>` (e.g. `Reality-Apple-SWDIST`), so the CDN in use is visible right after import.
+This release uses a **single-domain, single-port Reality** design: the default fronting target `cdn-dynmedia-1.microsoft.com:443` maps to one Reality inbound, plus TLS (8443) and XHTTP (8880) backup inbounds — **3 nodes** in total. Node names follow `<Type>-<CDN-Label>` (e.g. `Reality-Microsoft-CDN`). To scale, append `domain|port|label` entries to the `REALITY_CDNS` array at the top of the script; the Reality/TLS/XHTTP groups will cascade automatically.
 
 | Camouflage CDN | Node Label | Reality Port | dest |
 |----------------|-----------|--------------|------|
-| swdist.apple.com | Apple-SWDIST | 443 | swdist.apple.com:443 |
-| iosapps.itunes.apple.com | Apple-iTunes | 1443 | iosapps.itunes.apple.com:443 |
-| updates.cdn-apple.com | Apple-Update | 2443 | updates.cdn-apple.com:443 |
-| cdn-dynmedia-1.microsoft.com | Microsoft-CDN | 3443 | cdn-dynmedia-1.microsoft.com:443 |
-| www.bing.com | Bing | 4443 | www.bing.com:443 |
+| cdn-dynmedia-1.microsoft.com | Microsoft-CDN | 443 | cdn-dynmedia-1.microsoft.com:443 |
 
 | Type | Port | Protocol | Transport | Encryption | Purpose |
 |------|------|----------|-----------|------------|---------|
-| Reality | 443/1443/2443/3443/4443 | VLESS | TCP + Vision | Reality | Primary, anti-detection, Fragment |
-| TLS | 8443 | VLESS | TCP + Vision | TLS (self-signed) | Backup, SNI = CDN domain |
-| XHTTP | 8880 | VLESS | XHTTP | Reality | CDN compatible, Reality security layer, SNI = CDN domain |
+| Reality | 443 | VLESS | TCP + Vision | Reality | Primary, anti-detection, Fragment |
+| TLS | 8443 | VLESS | TCP + Vision | TLS (self-signed) | Backup, SNI = Microsoft-CDN domain |
+| XHTTP | 8880 | VLESS | XHTTP | Reality | CDN compatible, Reality security layer, SNI = Microsoft-CDN domain |
 
 - **Fragment**: TLS Client Hello fragmentation (100-200 bytes, 10-50ms interval) for enhanced anti-detection
-- **Reality**: Each domain gets its own inbound, port and dest — probes receive the real certificate of the corresponding CDN; no own domain/cert required
+- **Reality**: Single-domain, single-port — a probe only sees the real Microsoft dynamic media CDN certificate on 443. Default dest supports TLS1.3 + h2 with a clean certificate chain (Microsoft enterprise CA)
 - **Vision**: XTLS Vision flow control for high performance
 - **XHTTP**: HTTP/2-based XHTTP transport + Reality security layer (no self-signed cert needed), supports CDN relay
 - **Proxy group**: Proxy → Reality / TLS / XHTTP sub-groups, manual `select` only — no url-test or fallback
+
+## Reality Dest Selection & Self-Healing
+
+### Why single-domain, single-port?
+
+The previous release camouflaged 5 different sites (Apple, Microsoft, Bing) on 5 separate ports. In the Reality community this is considered a **strong active-probing signature**:
+
+- A single IP “owning” multiple high-value CDN domains across different companies does not match real server behavior;
+- Multi-port + multi-domain combinations are easily fingerprinted;
+- Bing and Apple download CDNs are overused in tutorials and already noisy.
+
+The new release converges to one domain on one port: the default dest `cdn-dynmedia-1.microsoft.com:443` matches a real-world Microsoft dynamic media CDN server — a probe only sees a clean enterprise CDN certificate.
+
+### Dest preflight & fallback pool
+
+During Step 7, `check_reality_dest` verifies each target with `openssl s_client -tls1_3 -alpn h2`:
+
+1. If the primary target `cdn-dynmedia-1.microsoft.com` passes, it is used directly;
+2. If it fails, the script tries the fallback pool in order: `updates.cdn-apple.com`, `iosapps.itunes.apple.com`, `download-porter.hoyoverse.com`, `osxapps.itunes.apple.com`, `music.apple.com`, `tv.apple.com`, `www.mi.com`, `buylite.music.apple.com`, `www.lamer.com.hk`;
+3. If the fallback pool also fails, the script warns but **continues deployment without blocking** (the server’s outbound may be restricted while the client side might still work).
+
+This mechanism lets the script self-heal when the default domain becomes unavailable, without requiring manual code edits.
 
 ## Routing Rules
 
@@ -218,13 +237,9 @@ Ensure these ports are open in your cloud security group/firewall before deploym
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 443 | TCP | Reality node - Apple-SWDIST (swdist.apple.com) |
-| 1443 | TCP | Reality node - Apple-iTunes (iosapps.itunes.apple.com) |
-| 2443 | TCP | Reality node - Apple-Update (updates.cdn-apple.com) |
-| 3443 | TCP | Reality node - Microsoft-CDN (cdn-dynmedia-1.microsoft.com) |
-| 4443 | TCP | Reality node - Bing (www.bing.com) |
-| 8443 | TCP | VLESS TLS backup nodes (shared by all 5 CDNs) |
-| 8880 | TCP | VLESS XHTTP CDN nodes (shared by all 5 CDNs) |
+| 443 | TCP | Reality primary node - Microsoft-CDN (cdn-dynmedia-1.microsoft.com) |
+| 8443 | TCP | VLESS TLS backup node (self-signed certificate) |
+| 8880 | TCP | VLESS XHTTP CDN-compatible node (Reality security layer) |
 | 10707 | TCP | Clash subscription HTTP endpoint (configurable) |
 
 ## Client Setup
@@ -239,7 +254,7 @@ Recommended clients:
 > **Note**:
 > - TLS (8443) nodes use self-signed certificates — enable **skip-cert-verify** in your client
 > - XHTTP (8880) nodes use the Reality security layer — no skip-cert-verify needed, but requires a recent mihomo/Clash Meta kernel (≥ 2024.1)
-> - Reality (443/1443/2443/3443/4443) nodes require no extra settings
+> - Reality (443) nodes require no extra settings
 
 ## System Tuning Parameters
 
@@ -277,7 +292,7 @@ Auto-installed packages:
 - **SELinux**: Auto-sets file context to prevent 403 Forbidden
 - **No hardcoded secrets**: All keys/UUIDs generated randomly at deploy time
 - **Clock check**: Verifies NTP sync before deployment (Reality handshake is time-sensitive)
-- **Config pre-check**: jq JSON validation + `xray run -test` semantic check; aborts and rolls back on failure
+- **Config pre-check**: jq JSON validation + `xray run -test` semantic check; aborts and rolls back on failure; Reality dest is additionally preflighted for TLS1.3 + h2 in Step 7 with automatic fallback
 
 ## Troubleshooting
 
