@@ -27,7 +27,7 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 - **Config pre-check**: jq JSON validation + `xray run -test` semantic check before starting services
 - **Clock detection**: Checks NTP sync before deployment (Reality handshake is time-sensitive)
 - **Self-healing start**: Auto-repairs certificate permissions and retries if Xray fails to start
-- **Cross-platform**: Supports apt/dnf/yum/pacman/zypper/apk (6 package managers)
+- **Cross-platform**: Supports apt/dnf/yum/pacman/zypper/apk (6 package managers). Alpine requires bash pre-installed and its OpenRC path is not fully tested
 - **Cross-init**: Supports systemd/sysvinit/OpenRC (3 service managers)
 - **Auto firewall**: Configures ufw/firewalld/iptables automatically (with rule persistence)
 - **SELinux compatible**: Auto-sets httpd_sys_content_t on CentOS/RHEL/Anolis
@@ -37,27 +37,27 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 
 ## Supported Operating Systems
 
-| Distro | Version | Package Mgr | Init System |
-|--------|---------|-------------|-------------|
-| Ubuntu | 16.04+ | apt | systemd |
-| Debian | 9+ | apt | systemd |
-| CentOS | 7+ | yum/dnf | systemd |
-| RHEL | 7+ | yum/dnf | systemd |
-| Rocky Linux | 8+ | dnf | systemd |
-| AlmaLinux | 8+ | dnf | systemd |
-| Anolis OS (龙蜥) | 8+ | dnf | systemd |
-| Fedora | 29+ | dnf | systemd |
-| openSUSE | Leap 15+ / Tumbleweed | zypper | systemd |
-| Arch Linux / Manjaro | Rolling | pacman | systemd |
-| Alpine Linux | 3.12+ | apk | OpenRC |
-| Amazon Linux | 2/2023 | yum/dnf | systemd |
-| openEuler (欧拉) | 20.03+ | dnf | systemd |
+| Distro | Version | Package Mgr | Init System | Notes |
+|--------|---------|-------------|-------------|-------|
+| Ubuntu | 16.04+ | apt | systemd | |
+| Debian | 9+ | apt | systemd | |
+| CentOS | 7+ | yum/dnf | systemd | |
+| RHEL | 7+ | yum/dnf | systemd | |
+| Rocky Linux | 8+ | dnf | systemd | |
+| AlmaLinux | 8+ | dnf | systemd | |
+| Anolis OS (龙蜥) | 8+ | dnf | systemd | |
+| Fedora | 29+ | dnf | systemd | |
+| openSUSE | Leap 15+ / Tumbleweed | zypper | systemd | |
+| Arch Linux / Manjaro | Rolling | pacman | systemd | |
+| Alpine Linux | 3.12+ | apk | OpenRC | bash required, OpenRC path not fully tested |
+| Amazon Linux | 2/2023 | yum/dnf | systemd | |
+| openEuler (欧拉) | 20.03+ | dnf | systemd | |
 
 > Container environments (OpenVZ/LXC): Swap creation failure will not abort deployment. Kernel 4.9+ required for BBR.
 
 ## Important Notes
 
-- **Subscription is HTTP by default**: The generated subscription URL is `http://IP:10707/random-path`. HTTP is transmitted in plaintext and can be intercepted by middleboxes. Use it only on trusted networks, or download `/usr/share/nginx/html/clash.yaml` directly via SFTP/SCP. HTTPS requires your own domain and certificate.
+- **Subscription is HTTP by default**: The generated subscription URL is `http://IP:10707/random-path`. HTTP is transmitted in plaintext and can be intercepted by middleboxes. Use it only on trusted networks, or download `/usr/share/nginx/html/clash.yaml` directly via SFTP/SCP. HTTPS requires your own domain and certificate. The safest option is to avoid the public subscription URL entirely and copy the config file locally with SFTP/SCP.
 - **TLS nodes need skip-cert-verify**: Port 8443 uses a self-signed certificate; clients must enable `skip-cert-verify`.
 - **Reality is the primary node**: The 443 Reality node requires no extra settings and is recommended for daily use; TLS and XHTTP serve as backup/compatibility nodes.
 
@@ -66,7 +66,7 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 ### Prerequisites
 
 - A Linux server with **root** access
-- Supported OS: Ubuntu 16.04+, Debian 9+, CentOS 7+, RHEL 7+, Rocky/Alma/Anolis 8+, Fedora 29+, openSUSE, Arch, Alpine
+- Supported OS: Ubuntu 16.04+, Debian 9+, CentOS 7+, RHEL 7+, Rocky/Alma/Anolis 8+, Fedora 29+, openSUSE, Arch, Alpine (bash required)
 - Kernel 4.9+ recommended (for BBR)
 - Open ports in your cloud security group: **443**, **8443**, **8880**, **10707**
 - `curl` or `wget` installed (most systems have them pre-installed)
@@ -87,7 +87,7 @@ wget -qO- https://raw.githubusercontent.com/Evergreen05/xray-proxy-install/main/
 
 ### Option 2: Unattended Install (-y flag)
 
-Skips all interactive prompts (auto-updates system, configures Swap if needed):
+Skips all interactive prompts (does **not** auto-update system packages; configures Swap if needed). `-y` mode is intended for repeated deployments or CI scenarios, avoiding unattended full system upgrades that could interrupt services. To upgrade system packages as well, use interactive mode and select yes manually:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Evergreen05/xray-proxy-install/main/install.sh) -y
@@ -198,8 +198,8 @@ The generated Clash subscription uses [Loyalsoldier/clash-rules](https://github.
 | `applications` | App-level process rules | DIRECT |
 
 **Key features:**
-- Designed for **Clash Premium** / **Clash Meta (mihomo)** kernel
-- Compatible with ClashX Pro, Clash for Windows, Clash Verge Rev, OpenClash, Shadowrocket, etc.
+- Designed for **Clash Meta (mihomo)** kernel
+- Compatible with Clash Verge Rev, mihomo Party, OpenClash (mihomo kernel), Shadowrocket (recent versions), Stash, etc. **Clash for Windows has been archived and does not support Reality/XHTTP/fragment — do not use it.**
 - **Auto-updated daily** at 06:30 Beijing time (24h interval configured)
 - Reliable data sources: v2ray-rules-dat, domain-list-community, China IP list
 - **Whitelist mode**: unmatched traffic defaults to proxy (MATCH=Proxy), ensuring all blocked sites go through the proxy
@@ -212,7 +212,7 @@ The generated Clash subscription uses [Loyalsoldier/clash-rules](https://github.
 
 - **fake-ip mode** (198.18.0.1/16): Faster connection setup; avoids connecting to poisoned IPs
 - **Domestic nameservers**: 223.5.5.5 / 119.29.29.29 / 114.114.114.114 (plain UDP, fast resolution)
-- **Fallback**: 1.1.1.1 / 8.8.8.8 (foreign DNS)
+- **Fallback**: `https://1.1.1.1/dns-query` / `https://dns.google/dns-query` (foreign DNS over HTTPS, avoids UDP pollution)
 - **fallback-filter**: GeoIP CN + geosite:gfw + 240.0.0.0/4 + specified domains (google/facebook/youtube) — blocked domains forced to fallback
 - **respect-rules**: DNS queries follow the same routing rules as traffic
 - **proxy-server-nameserver**: Proxy node domain resolution uses domestic DNS to avoid loops
