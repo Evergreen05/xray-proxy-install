@@ -8,13 +8,13 @@
 
 ---
 
-VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e-commerce networks. BBR optimization, auto Swap, Clash subscription, multi-distro support.
+VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e-commerce networks (v4.5). BBR optimization, auto Swap, Clash subscription, multi-distro support. Fragment splitting takes effect on the client subscription side only; the server no longer keeps an invalid fragment config.
 
 [![GitHub](https://img.shields.io/badge/GitHub-Evergreen05/xray--proxy--install-blue?logo=github)](https://github.com/Evergreen05/xray-proxy-install)
 
 ## Features
 
-- **Multi-protocol nodes**: Reality+Vision+Fragment (primary/anti-detection), VLESS+TLS (backup), XHTTP+Reality (CDN-compatible)
+- **Multi-protocol nodes**: Reality+Vision (primary/anti-detection), VLESS+TLS (backup), XHTTP+Reality (CDN-compatible); Fragment splitting is applied in the generated Clash subscription
 - **Single-domain, single-port Reality**: Default fronting target is `cdn-dynmedia-1.microsoft.com:443`. The server only exposes one real Microsoft dynamic media CDN certificate on 443, avoiding the strong active-probing signature of multi-port/multi-site setups
 - **Dest preflight at deploy time**: Step 7 uses `openssl s_client -tls1_3 -alpn h2` to verify the target. Failing domains are dropped; if all fail, the script auto-falls back through the backup pool. If the pool also fails, it warns and continues without blocking deployment
 - **DNS optimization**: Client-side fake-ip + fallback-filter anti-pollution; server-side Xray built-in DoH resolution
@@ -33,7 +33,7 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 - **SELinux compatible**: Auto-sets httpd_sys_content_t on CentOS/RHEL/Anolis
 - **Auto rollback**: Any failure triggers automatic rollback of all changes (restores previous config on overwrite installs)
 - **Management CLI**: `proxy-manager` command for post-deploy administration (includes config test & subscription URL query)
-- **Key fallback**: 5-mode X25519 key extraction with OpenSSL fallback
+- **Key fallback**: Multiple X25519 extraction and validation modes (JSON, regex, OpenSSL local generation, etc.), compatible with different Xray version outputs
 
 ## Supported Operating Systems
 
@@ -54,6 +54,12 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 | openEuler (欧拉) | 20.03+ | dnf | systemd |
 
 > Container environments (OpenVZ/LXC): Swap creation failure will not abort deployment. Kernel 4.9+ required for BBR.
+
+## Important Notes
+
+- **Subscription is HTTP by default**: The generated subscription URL is `http://IP:10707/random-path`. HTTP is transmitted in plaintext and can be intercepted by middleboxes. Use it only on trusted networks, or download `/usr/share/nginx/html/clash.yaml` directly via SFTP/SCP. HTTPS requires your own domain and certificate.
+- **TLS nodes need skip-cert-verify**: Port 8443 uses a self-signed certificate; clients must enable `skip-cert-verify`.
+- **Reality is the primary node**: The 443 Reality node requires no extra settings and is recommended for daily use; TLS and XHTTP serve as backup/compatibility nodes.
 
 ## Quick Start
 
@@ -130,7 +136,10 @@ The script runs through **14 steps** (plus a pre-check and final output):
 
 ## Node Configuration
 
-This release uses a **single-domain, single-port Reality** design: the default fronting target `cdn-dynmedia-1.microsoft.com:443` maps to one Reality inbound, plus TLS (8443) and XHTTP (8880) backup inbounds — **3 nodes** in total. Node names follow `<Type>-<CDN-Label>` (e.g. `Reality-Microsoft-CDN`). To scale, append `domain|port|label` entries to the `REALITY_CDNS` array at the top of the script; the Reality/TLS/XHTTP groups will cascade automatically.
+This release uses a **single-domain, single-port Reality** design: the default fronting target `cdn-dynmedia-1.microsoft.com:443` maps to one Reality inbound, plus TLS (8443) and XHTTP (8880) backup inbounds — **3 nodes** in total. Node names follow `<Type>-<CDN-Label>` (e.g. `Reality-Microsoft-CDN`).
+
+- If the primary target fails preflight and a fallback domain is adopted, all three nodes share that fallback domain (e.g. `Reality-Apple-Update`, `TLS-Apple-Update`, `XHTTP-Apple-Update`) on different ports;
+- To scale, append `domain|port|label` entries to the `REALITY_CDNS` array at the top of the script; the Reality/TLS/XHTTP groups will cascade automatically. Different Reality inbounds must use different ports and cannot all bind to 443.
 
 | Camouflage CDN | Node Label | Reality Port | dest |
 |----------------|-----------|--------------|------|
@@ -138,11 +147,11 @@ This release uses a **single-domain, single-port Reality** design: the default f
 
 | Type | Port | Protocol | Transport | Encryption | Purpose |
 |------|------|----------|-----------|------------|---------|
-| Reality | 443 | VLESS | TCP + Vision | Reality | Primary, anti-detection, Fragment |
+| Reality | 443 | VLESS | TCP + Vision | Reality | Primary, anti-detection; subscription includes Fragment |
 | TLS | 8443 | VLESS | TCP + Vision | TLS (self-signed) | Backup, SNI = Microsoft-CDN domain |
 | XHTTP | 8880 | VLESS | XHTTP | Reality | CDN compatible, Reality security layer, SNI = Microsoft-CDN domain |
 
-- **Fragment**: TLS Client Hello fragmentation (100-200 bytes, 10-50ms interval) for enhanced anti-detection
+- **Fragment**: TLS Client Hello fragmentation (100-200 bytes, 10-50ms interval) for enhanced anti-detection; applied by the Clash Meta client from the subscription side, Xray server no longer configures fragment
 - **Reality**: Single-domain, single-port — a probe only sees the real Microsoft dynamic media CDN certificate on 443. Default dest supports TLS1.3 + h2 with a clean certificate chain (Microsoft enterprise CA)
 - **Vision**: XTLS Vision flow control for high performance
 - **XHTTP**: HTTP/2-based XHTTP transport + Reality security layer (no self-signed cert needed), supports CDN relay
@@ -165,8 +174,8 @@ The new release converges to one domain on one port: the default dest `cdn-dynme
 During Step 7, `check_reality_dest` verifies each target with `openssl s_client -tls1_3 -alpn h2`:
 
 1. If the primary target `cdn-dynmedia-1.microsoft.com` passes, it is used directly;
-2. If it fails, the script tries the fallback pool in order: `updates.cdn-apple.com`, `iosapps.itunes.apple.com`, `download-porter.hoyoverse.com`, `osxapps.itunes.apple.com`, `music.apple.com`, `tv.apple.com`, `www.mi.com`, `buylite.music.apple.com`, `www.lamer.com.hk`;
-3. If the fallback pool also fails, the script warns but **continues deployment without blocking** (the server’s outbound may be restricted while the client side might still work).
+2. If it fails, the script tries the fallback pool in order: `updates.cdn-apple.com`, `iosapps.itunes.apple.com`, `download-porter.hoyoverse.com`, `osxapps.itunes.apple.com`, `music.apple.com`, `tv.apple.com`, `www.mi.com`, `buylite.music.apple.com`, `www.lamer.com.hk`; **only the first passing domain is adopted**, multiple fallback domains are not deployed simultaneously;
+3. If the fallback pool also fails, the script warns but **continues deployment without blocking** (the server’s outbound may be restricted while the client side might still work), and defaults to the first fallback domain to generate the config.
 
 This mechanism lets the script self-heal when the default domain becomes unavailable, without requiring manual code edits.
 
@@ -287,12 +296,24 @@ Auto-installed packages:
 ## Security
 
 - **Private key permissions**: 600 when Xray runs as root; 640 + chown for non-root; auto-repairs permissions and retries on startup failure
-- **Subscription endpoint**: Random 16-char hex path, only allows specific path, others return 404; access_log disabled for privacy
+- **Subscription endpoint**: Random 16-char hex path (16^16 search space, infeasible to brute-force), only allows specific path, others return 404; access_log disabled for privacy; HTTP by default, use only on trusted networks
 - **Security headers**: X-Content-Type-Options, X-Frame-Options, X-XSS-Protection
 - **SELinux**: Auto-sets file context to prevent 403 Forbidden
 - **No hardcoded secrets**: All keys/UUIDs generated randomly at deploy time
 - **Clock check**: Verifies NTP sync before deployment (Reality handshake is time-sensitive)
 - **Config pre-check**: jq JSON validation + `xray run -test` semantic check; aborts and rolls back on failure; Reality dest is additionally preflighted for TLS1.3 + h2 in Step 7 with automatic fallback
+
+## Version History
+
+### v4.5
+
+- Removed invalid server-side fragment config; Fragment splitting now takes effect on the Clash subscription side only.
+- Improved web-service handling: only stops running nginx/apache2/httpd/caddy processes and automatically restores non-conflicting services after rollback or deployment.
+- Improved nginx default-vhost handling: disabling the default site now uses "symlink removal + real-file rename" to avoid dangling symlinks that break `nginx -t`; default vhosts are restored on uninstall.
+- XHTTP inbound now includes `quic` / `routeOnly` sniffing settings.
+- `pkill` uses `-x` exact matching to avoid accidental kills.
+- Config semantic pre-check (`xray run -test`) moved after certificate generation to avoid the inevitable failure caused by missing certs.
+- Subscription path generation switched to `openssl rand -hex 8` fixed-length output to avoid the `tr | head` SIGPIPE issue that silently triggered rollback.
 
 ## Troubleshooting
 
@@ -374,7 +395,7 @@ This script is for learning and lawful use only. Users must comply with applicab
 
 ## Tech Stack
 
-- **Core**: Xray-core (VLESS + Reality + Vision + XHTTP + Fragment)
+- **Core**: Xray-core (VLESS + Reality + Vision + XHTTP); Fragment splitting is applied on the Clash subscription side
 - **Web Server**: Nginx
 - **Config formats**: JSON (Xray), YAML (Clash Meta)
 - **Encryption**: X25519 (Reality), ECC P-256 (self-signed TLS)

@@ -4,8 +4,12 @@ set -e -o pipefail
 export LC_ALL=C
 
 # ============================================
-# Xray Proxy Install Script v4.4
-# Protocol: VLESS + Reality + Vision + Fragment
+# Xray Proxy Install Script v4.5
+# Protocol: VLESS + Reality + Vision + Fragment（Fragment 在客户端订阅侧生效）
+# v4.5: 移除服务端无效 fragment 配置；仅停止运行中的 Web 服务且回滚/完成后自动恢复；
+#       nginx 默认 vhost 卸载时可恢复；XHTTP sniffing 补齐 quic/routeOnly；pkill 锚定防误杀；
+#       配置语义预检（xray run -test）移至证书生成之后（原顺序预检必失败：证书尚未生成）；
+#       默认 vhost 禁用改为"符号链接删除+真实文件重命名"（旧逻辑留下悬空链接导致 nginx -t 必失败）
 # 伪装策略: 单域名单端口 Reality（避免一机多站探测特征）+ TLS/XHTTP 备用组
 # Optimization: BBR / TCP / Subscription endpoint / Auto Swap / DNS
 # Compatibility: apt/dnf/yum 已验证; pacman/zypper/apk 理论支持（未经充分测试，官方 Xray 安装器依赖 systemd）
@@ -426,9 +430,16 @@ if command -v xray &>/dev/null && [ -f /usr/local/etc/xray/config.json ]; then
     pkill -x xray 2>/dev/null || true
 fi
 
+# 只处理部署前确实在运行的 Web 服务，并记录清单：
+# 1) 失败回滚时逐一恢复启动（回滚栈后进先出，此处在端口检测之后执行，恢复的是原始环境）
+# 2) 端口检测通过后，恢复与本脚本无冲突的非 nginx 服务
+# （nginx 由本脚本接管配置，不在这里恢复，后续步骤统一启动）
+WEB_SVCS_WERE_RUNNING=()
 for _svc in nginx apache2 httpd caddy; do
-    if command -v "$_svc" &>/dev/null; then
+    if command -v "$_svc" &>/dev/null && is_service_active "$_svc" 2>/dev/null; then
+        WEB_SVCS_WERE_RUNNING+=("$_svc")
         service_manage stop "$_svc" 2>/dev/null || true
+        add_rollback "service_manage start $_svc 2>/dev/null || true"
     fi
 done
 sleep 1
@@ -464,6 +475,14 @@ if [ "$PORT_CONFLICT" -eq 1 ] && [ "$AUTO_YES" -eq 0 ]; then
     CONTINUE=${CONTINUE:-n}
     [[ "$CONTINUE" != "y" && "$CONTINUE" != "Y" ]] && error "部署已取消"
 fi
+
+# 端口检测已通过，恢复与本脚本无冲突的非 nginx Web 服务
+# （若用户选择在端口冲突下继续，后续服务启动失败会触发回滚，回滚栈会再次尝试恢复）
+for _svc in "${WEB_SVCS_WERE_RUNNING[@]}"; do
+    if [ "$_svc" != "nginx" ]; then
+        service_manage start "$_svc" 2>/dev/null || true
+    fi
+done
 
 # ============================================
 # 4. 系统更新与依赖安装
@@ -643,7 +662,8 @@ fi
 service_manage stop xray 2>/dev/null || true
 sleep 1
 # 兜底：确保没有残留的 xray 进程占用端口
-pkill -f "/usr/local/bin/xray" 2>/dev/null || true
+# 锚定完整路径开头，避免误杀命令行中仅包含该路径的无关进程（如编辑器打开同路径文件）
+pkill -f "^/usr/local/bin/xray" 2>/dev/null || true
 sleep 1
 
 # ============================================
@@ -854,11 +874,6 @@ for entry in "${REALITY_CDNS[@]}"; do
             "streamSettings": {
                 "network": "tcp",
                 "security": "reality",
-                "fragment": {
-                    "packets": "tlshello",
-                    "length": "100-200",
-                    "interval": "10-50"
-                },
                 "realitySettings": {
                     "show": false,
                     "dest": "${CDN_DOMAIN}:443",
@@ -942,11 +957,6 @@ ${REALITY_INBOUNDS},
             "streamSettings": {
                 "network": "tcp",
                 "security": "tls",
-                "fragment": {
-                    "packets": "tlshello",
-                    "length": "100-200",
-                    "interval": "10-50"
-                },
                 "tlsSettings": {
                     "certificates": [
                         {
@@ -1008,8 +1018,10 @@ ${REALITY_INBOUNDS},
                 "enabled": true,
                 "destOverride": [
                     "http",
-                    "tls"
-                ]
+                    "tls",
+                    "quic"
+                ],
+                "routeOnly": true
             },
             "tag": "vless-xhttp"
         }
@@ -1040,13 +1052,9 @@ ${REALITY_INBOUNDS},
 EOF
 add_rollback "rm -f /usr/local/etc/xray/config.json"
 
-# 部署前预检：先验证 JSON 合法性，再用 xray 自带测试验证配置语义
+# JSON 合法性即时校验；语义预检（xray run -test）移到证书生成之后，
+# 因为 test 会真实加载 TLS 入站引用的 /etc/xray/server.crt
 jq empty /usr/local/etc/xray/config.json 2>/dev/null || error "config.json 不是合法 JSON"
-if ! xray run -test -config /usr/local/etc/xray/config.json >/tmp/xray-test.log 2>&1; then
-    cat /tmp/xray-test.log
-    error "Xray 配置预检失败，已中止（详见上方输出）"
-fi
-log "Xray 配置预检通过"
 
 # ============================================
 # 9. 生成自签名证书
@@ -1090,6 +1098,13 @@ else
     fi
 fi
 add_rollback "rm -f /etc/xray/server.crt /etc/xray/server.key"
+
+# 配置语义预检放在证书生成之后：xray run -test 会真实加载 TLS 入站引用的证书文件
+if ! xray run -test -config /usr/local/etc/xray/config.json >/tmp/xray-test.log 2>&1; then
+    cat /tmp/xray-test.log
+    error "Xray 配置预检失败，已中止（详见上方输出）"
+fi
+log "Xray 配置预检通过"
 
 # ============================================
 # 10. 生成 Clash 订阅配置
@@ -1355,11 +1370,40 @@ rm -f /etc/nginx/sites-enabled/proxy-sub 2>/dev/null || true
 rm -f /etc/nginx/sites-enabled/proxy-sub-secure 2>/dev/null || true
 rm -f /etc/nginx/sites-available/proxy-sub 2>/dev/null || true
 rm -f /etc/nginx/sites-available/proxy-sub-secure 2>/dev/null || true
-rm -f /etc/nginx/conf.d/default.conf 2>/dev/null || true
-# 发行版默认 vhost 不直接删除，重命名禁用以便恢复
-for f in /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default; do
-    [ -e "$f" ] || [ -L "$f" ] && mv -f "$f" "${f}.disabled-by-proxy" 2>/dev/null || true
+# 恢复默认 vhost（供回滚栈 eval 调用；proxy-manager 卸载段有同等实现）
+restore_nginx_default_vhosts() {
+    for f in /etc/nginx/conf.d/default.conf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default; do
+        if [ -e "${f}.disabled-by-proxy" ] || [ -L "${f}.disabled-by-proxy" ]; then
+            mv -f "${f}.disabled-by-proxy" "$f" 2>/dev/null || true
+        fi
+    done
+    # 重建安装时删除的 sites-enabled/default 符号链接（Debian/Ubuntu 布局）
+    if [ "${NGINX_DEFAULT_SYMLINK:-0}" = "1" ] && [ -e /etc/nginx/sites-available/default ] && [ ! -e /etc/nginx/sites-enabled/default ] && [ ! -L /etc/nginx/sites-enabled/default ]; then
+        ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default 2>/dev/null || true
+    fi
+}
+
+# Debian/Ubuntu 的 sites-enabled/default 是指向 sites-available/default 的符号链接，
+# 若把符号链接与其目标都 mv 重命名，会留下指向不存在目标的悬空链接，
+# nginx.conf 的 include /etc/nginx/sites-enabled/* 通配符匹配到它即报 emerg（nginx -t 失败）。
+# 因此：符号链接只删除并记录（回滚/卸载时重建），真实文件才重命名为 .disabled-by-proxy。
+NGINX_DEFAULT_SYMLINK=0
+# 清理历史失败运行遗留的悬空符号链接，避免重复卡在同一处
+if [ -L /etc/nginx/sites-enabled/default.disabled-by-proxy ] && [ ! -e /etc/nginx/sites-enabled/default.disabled-by-proxy ]; then
+    rm -f /etc/nginx/sites-enabled/default.disabled-by-proxy
+    NGINX_DEFAULT_SYMLINK=1
+fi
+for f in /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default; do
+    if [ -L "$f" ]; then
+        rm -f "$f"
+        if [ "$f" = "/etc/nginx/sites-enabled/default" ]; then
+            NGINX_DEFAULT_SYMLINK=1
+        fi
+    elif [ -e "$f" ]; then
+        mv -f "$f" "${f}.disabled-by-proxy" 2>/dev/null || true
+    fi
 done
+add_rollback "restore_nginx_default_vhosts"
 service_manage stop nginx 2>/dev/null || true
 sleep 1
 
@@ -1485,11 +1529,12 @@ PROXY_PORTS="${PROXY_PORTS[*]}"
 REALITY_PORTS="${REALITY_PORTS[*]}"
 CDN_LABELS="${CDN_LABELS}"
 NODE_TYPES="Reality TLS XHTTP"
+NGINX_DEFAULT_SYMLINK="${NGINX_DEFAULT_SYMLINK:-0}"
 ENVEOF
 
 cat > /usr/local/bin/proxy-manager << 'MGRSCRIPT'
 #!/bin/bash
-# Xray Proxy Manager v4.4
+# Xray Proxy Manager v4.5
 # https://github.com/Evergreen05/xray-proxy-install
 
 RED='\033[0;31m'
@@ -1504,6 +1549,7 @@ PROXY_PORTS=${PROXY_PORTS:-"443 1443 2443 3443 4443 8443 8880"}
 REALITY_PORTS=${REALITY_PORTS:-"443 1443 2443 3443 4443"}
 CDN_LABELS=${CDN_LABELS:-"Apple-SWDIST Apple-iTunes Apple-Update Microsoft-CDN Bing"}
 NODE_TYPES=${NODE_TYPES:-"Reality TLS XHTTP"}
+NGINX_DEFAULT_SYMLINK=${NGINX_DEFAULT_SYMLINK:-0}
 
 service_manage() {
     local action=$1
@@ -1712,13 +1758,25 @@ case "$1" in
         rm -f /etc/nginx/conf.d/proxy-sub.conf
         rm -f /etc/nginx/sites-available/proxy-sub-secure
         rm -f /etc/nginx/sites-enabled/proxy-sub-secure
+        # 恢复安装时被重命名禁用的发行版默认 vhost（如有）
+        for f in /etc/nginx/conf.d/default.conf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default; do
+            if [ -e "${f}.disabled-by-proxy" ] || [ -L "${f}.disabled-by-proxy" ]; then
+                mv -f "${f}.disabled-by-proxy" "$f" 2>/dev/null || true
+            fi
+        done
+        # 重建安装时删除的 sites-enabled/default 符号链接（Debian/Ubuntu 布局）
+        if [ "${NGINX_DEFAULT_SYMLINK:-0}" = "1" ] && [ -e /etc/nginx/sites-available/default ] && [ ! -e /etc/nginx/sites-enabled/default ] && [ ! -L /etc/nginx/sites-enabled/default ]; then
+            ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default 2>/dev/null || true
+        fi
         rm -f /var/www/html/clash.yaml
         rm -f /usr/share/nginx/html/clash.yaml
         rm -f /usr/local/bin/proxy-manager
         rm -f /etc/sysctl.d/99-proxy-optimized.conf
         rm -f /etc/security/limits.d/99-proxy.conf
         rm -rf /etc/systemd/system/xray.service.d
-        rm -rf /etc/systemd/system/nginx.service.d
+        # 只删除本脚本写入的 drop-in，目录内若有用户自定义配置则保留
+        rm -f /etc/systemd/system/nginx.service.d/limits.conf
+        rmdir /etc/systemd/system/nginx.service.d 2>/dev/null || true
         rm -f /etc/proxy-manager.env
         if command -v systemctl &>/dev/null; then
             systemctl daemon-reload 2>/dev/null || true
@@ -1728,7 +1786,7 @@ case "$1" in
         echo -e "${GREEN}卸载完成${NC}"
         ;;
     *)
-        echo -e "${BLUE}Xray Proxy Manager v4.4${NC}"
+        echo -e "${BLUE}Xray Proxy Manager v4.5${NC}"
         echo -e "GitHub: https://github.com/Evergreen05/xray-proxy-install"
         echo ""
         echo "用法: proxy-manager <命令>"
@@ -1812,7 +1870,7 @@ DEPLOY_SUCCESS=1
 rm -f /usr/local/etc/xray/config.json.prevbak /etc/xray/server.crt.prevbak /etc/xray/server.key.prevbak 2>/dev/null || true
 
 # ============================================
-# 15. 输出部署结果
+# 输出部署结果
 # ============================================
 echo ""
 echo -e "${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
