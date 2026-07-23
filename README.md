@@ -213,14 +213,14 @@ bash install.sh
 
 - **fake-ip 模式**（198.18.0.1/16）：加速连接建立，避免 DNS 污染导致连错 IP
 - **国内 nameserver**：223.5.5.5 / 119.29.29.29 / 114.114.114.114（纯 UDP，解析快）
-- **fallback**：`https://1.1.1.1/dns-query` / `https://dns.google/dns-query`（国外 DoH，防 UDP 污染）
+- **fallback**：`1.1.1.1` / `8.8.8.8`（明文 UDP）
 - **fallback-filter**：GeoIP CN + geosite:gfw + 240.0.0.0/4 + 指定域名（google/facebook/youtube），被墙域名强制走 fallback 防污染
-- **respect-rules**：DNS 查询同样遵循分流规则
+- **respect-rules**：DNS 查询同样遵循分流规则。`1.1.1.1`/`8.8.8.8` 不命中 cncidr/GEOIP,CN → 落到规则链末尾的 `MATCH,Proxy` → DNS 查询经代理隧道发出，明文 UDP 被隧道加密保护，无需 DoH 二次加密（省一次 TLS 握手，且无 `dns.google` 解析依赖）。**隐患：此方案依赖 `MATCH,Proxy` 兜底，切勿将 `1.1.1.1`/`8.8.8.8` 加入 DIRECT/IP-CIDR 规则，否则 DNS 查询将明文直连被 GFW 投毒。若改规则后无法保证，请改回 DoH 更稳妥。**
 - **proxy-server-nameserver**：代理节点域名解析走国内 DNS，避免死循环
 
 ### 服务端（Xray）
 
-- Xray 内置 DNS：`https://1.1.1.1/dns-query` + `https://dns.google/dns-query` + 8.8.8.8
+- Xray 内置 DNS：`https://1.1.1.1/dns-query` + `https://dns.google/dns-query`（DoH）
 - freedom 出站 `domainStrategy: UseIPv4`，避免 VPS 系统 DNS 异常或 IPv6 回退问题
 
 ## 部署后管理

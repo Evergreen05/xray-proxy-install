@@ -19,8 +19,9 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 - **Dest preflight at deploy time**: Step 7 uses `openssl s_client -tls1_3 -alpn h2` to verify the target. Failing domains are dropped; if all fail, the script auto-falls back through the backup pool. If the pool also fails, it warns and continues without blocking deployment
 - **DNS optimization**: Client-side fake-ip + fallback-filter anti-pollution; server-side Xray built-in DoH resolution
 - **Auto BBR optimization**: Dynamic TCP buffer calculation based on available memory
-- **Auto Swap**: Automatically configures 2GB Swap on low-memory servers (<1GB)
+- **Auto Swap**: Prompts to configure 2GB Swap when Swap is below 2GB (creation failure in container environments does not abort deployment)
 - **Clash subscription**: Auto-generates Clash Meta format subscription via Nginx HTTP endpoint
+- **VLESS universal subscription**: Also generates base64-encoded `vless://` links (`nodes.txt` / `<sub-path>-vless` endpoint) for clients that do not support Clash Meta YAML (v2rayN/v2rayNG/Shadowrocket legacy versions)
 - **Smart routing rules**: Powered by [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) (⭐ ~27.6k), auto-updated daily, whitelist mode with precise geo-routing
 - **Auto certificates**: ECC P-256 self-signed certs (SAN covers all camouflage domains) with secure permission handling
 - **Pinned version**: Xray-core installed at a fixed version (v26.3.27), auto-fallback to latest on failure
@@ -127,8 +128,8 @@ The script runs through **14 steps** (plus a pre-check and final output):
 | 7 | Generate UUID, X25519 keypair, Short ID, subscription path; **preflight Reality dest (TLS1.3 + h2), auto-fallback to backup pool on failure** |
 | 8 | Generate Xray config (3 inbounds: Reality + TLS + XHTTP) + config pre-check |
 | 9 | Generate self-signed ECC certificates (SAN covers camouflage domains) with secure permissions |
-| 10 | Generate Clash subscription config (3 nodes + DNS + routing rules) |
-| 11 | Configure Nginx subscription endpoint |
+| 10 | Generate Clash subscription config (3 nodes + DNS + routing rules) + VLESS universal subscription (`nodes.txt` / base64) |
+| 11 | Configure Nginx subscription endpoints (Clash + VLESS) |
 | 12 | Configure systemd limits & start services (with auto cert-permission repair) |
 | 13 | Create `proxy-manager` CLI tool |
 | 14 | Firewall rules & health checks |
@@ -200,7 +201,7 @@ The generated Clash subscription uses [Loyalsoldier/clash-rules](https://github.
 **Key features:**
 - Designed for **Clash Meta (mihomo)** kernel
 - Compatible with Clash Verge Rev, mihomo Party, OpenClash (mihomo kernel), Shadowrocket (recent versions), Stash, etc. **Clash for Windows has been archived and does not support Reality/XHTTP/fragment — do not use it.**
-- **Auto-updated daily** at 06:30 Beijing time (24h interval configured)
+- **Auto-updated every 24 hours** (rolling interval from the client's first fetch, not a fixed time of day)
 - Reliable data sources: v2ray-rules-dat, domain-list-community, China IP list
 - **Whitelist mode**: unmatched traffic defaults to proxy (MATCH=Proxy), ensuring all blocked sites go through the proxy
 
@@ -212,14 +213,14 @@ The generated Clash subscription uses [Loyalsoldier/clash-rules](https://github.
 
 - **fake-ip mode** (198.18.0.1/16): Faster connection setup; avoids connecting to poisoned IPs
 - **Domestic nameservers**: 223.5.5.5 / 119.29.29.29 / 114.114.114.114 (plain UDP, fast resolution)
-- **Fallback**: `https://1.1.1.1/dns-query` / `https://dns.google/dns-query` (foreign DNS over HTTPS, avoids UDP pollution)
+- **Fallback**: `1.1.1.1` / `8.8.8.8` (plain UDP)
 - **fallback-filter**: GeoIP CN + geosite:gfw + 240.0.0.0/4 + specified domains (google/facebook/youtube) — blocked domains forced to fallback
-- **respect-rules**: DNS queries follow the same routing rules as traffic
+- **respect-rules**: DNS queries follow the same routing rules as traffic. `1.1.1.1`/`8.8.8.8` does not match cncidr/GEOIP,CN → falls through to `MATCH,Proxy` at the end of the rule chain → DNS queries are sent through the proxy tunnel, where plain UDP is encrypted by the tunnel — no need for DoH double encryption (saves one TLS handshake, and no `dns.google` resolution dependency). **Caveat: this setup relies on the `MATCH,Proxy` fallback. Never add `1.1.1.1`/`8.8.8.8` to DIRECT/IP-CIDR rules, otherwise DNS queries will go plaintext direct and be poisoned by the GFW. If you cannot guarantee this after rule changes, switch back to DoH for safety.**
 - **proxy-server-nameserver**: Proxy node domain resolution uses domestic DNS to avoid loops
 
 ### Server-side (Xray)
 
-- Xray built-in DNS: `https://1.1.1.1/dns-query` + `https://dns.google/dns-query` + 8.8.8.8
+- Xray built-in DNS: `https://1.1.1.1/dns-query` + `https://dns.google/dns-query` (DoH)
 - Freedom outbound `domainStrategy: UseIPv4` — immune to broken VPS resolvers or IPv6 fallback issues
 
 ## Post-Deployment Management
@@ -253,15 +254,25 @@ Ensure these ports are open in your cloud security group/firewall before deploym
 
 ## Client Setup
 
-Recommended clients:
+The script generates two subscription formats — choose by client type:
 
-- **Clash Meta / Mihomo**: Import subscription URL directly
-- **v2rayN** (Windows): Add VLESS nodes manually or import subscription
-- **Shadowrocket** (iOS): Supports Clash subscription and VLESS
-- **v2rayNG** (Android): Supports VLESS and subscription import
+### Subscription Endpoints
+
+| Endpoint | Format | Suitable Clients |
+|----------|--------|------------------|
+| `http://IP:10707/<sub-path>` | Clash Meta YAML | Clash Meta / Mihomo / v2rayN 6.x+ |
+| `http://IP:10707/<sub-path>-vless` | VLESS base64 universal subscription | v2rayN/v2rayNG/Shadowrocket legacy versions |
+
+### Recommended Clients
+
+- **Clash Meta / Mihomo**: Import the Clash subscription URL directly
+- **v2rayN** (Windows): 6.x+ can import the Clash subscription; legacy versions import the VLESS universal subscription (`-vless` endpoint)
+- **Shadowrocket** (iOS): Both subscription formats are supported
+- **v2rayNG** (Android): Recent versions can import the Clash subscription; legacy versions import the VLESS universal subscription (`-vless` endpoint)
 
 > **Note**:
-> - TLS (8443) nodes use self-signed certificates — enable **skip-cert-verify** in your client
+> - The Clash subscription is **Clash Meta YAML format** — legacy v2rayN/v2rayNG cannot import it directly; use the VLESS universal subscription endpoint (with `-vless` suffix) instead
+> - TLS (8443) nodes use self-signed certificates — enable **skip-cert-verify** in your client (the VLESS link already includes `allowInsecure=1`)
 > - XHTTP (8880) nodes use the Reality security layer — no skip-cert-verify needed, but requires a recent mihomo/Clash Meta kernel (≥ 2024.1)
 > - Reality (443) nodes require no extra settings
 
@@ -314,6 +325,20 @@ Auto-installed packages:
 - `pkill` uses `-x` exact matching to avoid accidental kills.
 - Config semantic pre-check (`xray run -test`) moved after certificate generation to avoid the inevitable failure caused by missing certs.
 - Subscription path generation switched to `openssl rand -hex 8` fixed-length output to avoid the `tr | head` SIGPIPE issue that silently triggered rollback.
+
+### v4.5.1
+
+- **Added VLESS universal subscription**: Also generates base64-encoded `vless://` links (`nodes.txt` + `<sub-path>-vless` endpoint) for clients that do not support Clash Meta YAML (v2rayN/v2rayNG/Shadowrocket legacy versions).
+- **Fixed Xray install fallback**: curl download failure no longer silently succeeds — now downloads to a temp file + non-empty check, with a clear error on failure.
+- **Fixed Swap fstab write timing**: `swapon` failure no longer unconditionally writes to fstab, avoiding failed-mount logs on every boot in container environments.
+- **Fixed uninstall hardcoded paths**: `proxy-manager uninstall` and `rules` commands now use `$WEB_ROOT` — no more leftover files when paths differ.
+- **Fixed uninstall Xray silent success**: Switched to temp-file mode + warn prompt for manual uninstall when download fails.
+- **Improved `read` behavior on EOF**: Non-interactive pipe input no longer causes silent exit.
+- **Improved Alpine compatibility**: Defensive `mkdir -p` before writing nginx conf.d config.
+- **Improved Swap disk-space preflight**: Checks root partition free space before creation; warns if insufficient.
+- **Improved Xray version observability**: Prints the actual installed version number after install.
+- **Improved rollback-stack eval safety constraint**: Added comment clarifying that only hardcoded strings are allowed.
+- **Doc fixes**: Subscription update interval (rolling 24h, not fixed 06:30), low-memory prompt condition (Swap < 2GB, not RAM < 1GB), v2rayN/v2rayNG subscription format notes.
 
 ## Troubleshooting
 
@@ -376,6 +401,7 @@ nginx -t                                  # Nginx config test
 | Xray certs | `/etc/xray/server.crt` / `/etc/xray/server.key` |
 | Xray binary | `/usr/local/bin/xray` |
 | Clash subscription | `/usr/share/nginx/html/clash.yaml` (or `/var/www/html/`) |
+| VLESS universal subscription | `/usr/share/nginx/html/nodes.txt` (raw) + `nodes_base64.txt` (base64) |
 | Nginx config | `/etc/nginx/conf.d/proxy-sub.conf` |
 | Manager CLI | `/usr/local/bin/proxy-manager` |
 | Manager CLI env | `/etc/proxy-manager.env` |
