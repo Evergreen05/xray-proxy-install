@@ -630,6 +630,10 @@ net.ipv4.conf.default.accept_source_route=0
 net.ipv4.icmp_echo_ignore_broadcasts=1
 net.ipv4.icmp_ignore_bogus_error_responses=1
 
+# --- UDP 缓冲区（代理 UDP 中继/QUIC/语音视频时减少丢包）---
+net.core.rmem_udp_max=4194304
+net.core.wmem_udp_max=4194304
+
 # --- Swap 优化 ---
 vm.swappiness=10
 vm.vfs_cache_pressure=50
@@ -1278,6 +1282,15 @@ dns:
     default-nameserver: [223.5.5.5, 119.29.29.29, 114.114.114.114]
     enhanced-mode: fake-ip
     fake-ip-range: 198.18.0.1/16
+    # fake-ip-filter：以下域名返回真实 IP（不走 fake-ip），防止 Windows NCSI
+    # 网络连通性检测误判"无法访问 Internet"（TUN 模式关闭后缓存的 fake-ip 失效）
+    fake-ip-filter:
+      - "*.lan"
+      - "*.local"
+      - "+.msftconnecttest.com"
+      - "+.msftncsi.com"
+      - "+.apple.com"
+      - "+.icloud.com"
     use-hosts: true
     respect-rules: true
     proxy-server-nameserver: [223.5.5.5, 119.29.29.29, 114.114.114.114]
