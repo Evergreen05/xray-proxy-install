@@ -12,56 +12,6 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 
 [![GitHub](https://img.shields.io/badge/GitHub-Evergreen05/xray--proxy--install-blue?logo=github)](https://github.com/Evergreen05/xray-proxy-install)
 
-## Features
-
-- **Multi-protocol nodes**: Reality+Vision (primary/anti-detection), VLESS+TLS (backup), XHTTP+Reality (CDN-compatible); Fragment splitting is applied in the generated Clash subscription
-- **Single-domain, single-port Reality**: Default fronting target is `cdn-dynmedia-1.microsoft.com:443`. The server only exposes one real Microsoft dynamic media CDN certificate on 443, avoiding the strong active-probing signature of multi-port/multi-site setups
-- **Dest preflight at deploy time**: Step 7 uses `openssl s_client -tls1_3 -alpn h2` to verify the target. Failing domains are dropped; if all fail, the script auto-falls back through the backup pool. If the pool also fails, it warns and continues without blocking deployment
-- **DNS optimization**: Client-side fake-ip + fallback-filter anti-pollution; server-side Xray built-in DoH resolution
-- **Auto BBR optimization**: Intelligently calculates TCP buffer and connection queue parameters based on user-input bandwidth (Mbps) using a 100ms RTT formula
-- **Swap configuration**: Interactive mode asks whether to configure and how much (MB), recommended at 2× physical RAM; unattended mode (-y) skips entirely (creation failure in containers does not abort deployment)
-- **Clash subscription**: Auto-generates Clash Meta format subscription via Nginx HTTP endpoint
-- **VLESS universal subscription**: Also generates base64-encoded `vless://` links (`nodes.txt` / `<sub-path>-vless` endpoint) for clients that do not support Clash Meta YAML (v2rayN/v2rayNG/Shadowrocket legacy versions)
-- **Smart routing rules**: Powered by [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) (⭐ ~27.6k), auto-updated daily, whitelist mode with precise geo-routing
-- **Auto certificates**: ECC P-256 self-signed certs (SAN covers all camouflage domains) with secure permission handling
-- **Pinned version**: Xray-core installed at a fixed version (v26.3.27), auto-fallback to latest on failure
-- **Config pre-check**: jq JSON validation + `xray run -test` semantic check before starting services
-- **Clock detection**: Checks NTP sync before deployment (Reality handshake is time-sensitive)
-- **Self-healing start**: Auto-repairs certificate permissions and retries if Xray fails to start
-- **Cross-platform**: Supports apt/dnf/yum/pacman/zypper/apk (6 package managers). Alpine requires bash pre-installed and its OpenRC path is not fully tested
-- **Cross-init**: Supports systemd/sysvinit/OpenRC (3 service managers)
-- **Auto firewall**: Configures ufw/firewalld/iptables automatically (with rule persistence)
-- **SELinux compatible**: Auto-sets httpd_sys_content_t on CentOS/RHEL/Anolis
-- **Auto rollback**: Any failure triggers automatic rollback of all changes (restores previous config on overwrite installs)
-- **Management CLI**: `proxy-manager` command for post-deploy administration (includes config test & subscription URL query)
-- **Key fallback**: Multiple X25519 extraction and validation modes (JSON, regex, OpenSSL local generation, etc.), compatible with different Xray version outputs
-
-## Supported Operating Systems
-
-| Distro | Version | Package Mgr | Init System | Notes |
-|--------|---------|-------------|-------------|-------|
-| Ubuntu | 16.04+ | apt | systemd | |
-| Debian | 9+ | apt | systemd | |
-| CentOS | 7+ | yum/dnf | systemd | |
-| RHEL | 7+ | yum/dnf | systemd | |
-| Rocky Linux | 8+ | dnf | systemd | |
-| AlmaLinux | 8+ | dnf | systemd | |
-| Anolis OS (龙蜥) | 8+ | dnf | systemd | |
-| Fedora | 29+ | dnf | systemd | |
-| openSUSE | Leap 15+ / Tumbleweed | zypper | systemd | |
-| Arch Linux / Manjaro | Rolling | pacman | systemd | |
-| Alpine Linux | 3.12+ | apk | OpenRC | bash required, OpenRC path not fully tested |
-| Amazon Linux | 2/2023 | yum/dnf | systemd | |
-| openEuler (欧拉) | 20.03+ | dnf | systemd | |
-
-> Container environments (OpenVZ/LXC): Swap creation failure will not abort deployment. Kernel 4.9+ required for BBR.
-
-## Important Notes
-
-- **Subscription is HTTP by default**: The generated subscription URL is `http://IP:10707/random-path`. HTTP is transmitted in plaintext and can be intercepted by middleboxes. Use it only on trusted networks, or download `/usr/share/nginx/html/clash.yaml` directly via SFTP/SCP. HTTPS requires your own domain and certificate. The safest option is to avoid the public subscription URL entirely and copy the config file locally with SFTP/SCP.
-- **TLS nodes need skip-cert-verify**: Port 8443 uses a self-signed certificate; clients must enable `skip-cert-verify`.
-- **Reality is the primary node**: The 443 Reality node requires no extra settings and is recommended for daily use; TLS and XHTTP serve as backup/compatibility nodes.
-
 ## Quick Start
 
 ### Prerequisites
@@ -111,6 +61,56 @@ bash install.sh
 ```
 
 > **Tip**: After deployment, use `proxy-manager info` to view your subscription URL and node parameters.
+
+## Features
+
+- **Multi-protocol nodes**: Reality+Vision (primary/anti-detection), VLESS+TLS (backup), XHTTP+Reality (CDN-compatible); Fragment splitting is applied in the generated Clash subscription
+- **Single-domain, single-port Reality**: Default fronting target is `cdn-dynmedia-1.microsoft.com:443`. The server only exposes one real Microsoft dynamic media CDN certificate on 443, avoiding the strong active-probing signature of multi-port/multi-site setups
+- **Dest preflight at deploy time**: Step 7 uses `openssl s_client -tls1_3 -alpn h2` to verify the target. Failing domains are dropped; if all fail, the script auto-falls back through the backup pool. If the pool also fails, it warns and continues without blocking deployment
+- **DNS optimization**: Client-side fake-ip + fallback-filter anti-pollution; server-side Xray built-in DoH resolution
+- **Auto BBR optimization**: Intelligently calculates TCP buffer and connection queue parameters based on user-input bandwidth (Mbps) using a 100ms RTT formula
+- **Swap configuration**: Interactive mode asks whether to configure and how much (MB), recommended at 2× physical RAM; unattended mode (-y) skips entirely (creation failure in containers does not abort deployment)
+- **Clash subscription**: Auto-generates Clash Meta format subscription via Nginx HTTP endpoint
+- **VLESS universal subscription**: Also generates base64-encoded `vless://` links (`nodes.txt` / `<sub-path>-vless` endpoint) for clients that do not support Clash Meta YAML (v2rayN/v2rayNG/Shadowrocket legacy versions)
+- **Smart routing rules**: Powered by [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) (⭐ ~27.6k), auto-updated daily, whitelist mode with precise geo-routing
+- **Auto certificates**: ECC P-256 self-signed certs (SAN covers all camouflage domains) with secure permission handling
+- **Pinned version**: Xray-core installed at a fixed version (v26.3.27), auto-fallback to latest on failure
+- **Config pre-check**: jq JSON validation + `xray run -test` semantic check before starting services
+- **Clock detection**: Checks NTP sync before deployment (Reality handshake is time-sensitive)
+- **Self-healing start**: Auto-repairs certificate permissions and retries if Xray fails to start
+- **Cross-platform**: Supports apt/dnf/yum/pacman/zypper/apk (6 package managers). Alpine requires bash pre-installed and its OpenRC path is not fully tested
+- **Cross-init**: Supports systemd/sysvinit/OpenRC (3 service managers)
+- **Auto firewall**: Configures ufw/firewalld/iptables automatically (with rule persistence)
+- **SELinux compatible**: Auto-sets httpd_sys_content_t on CentOS/RHEL/Anolis
+- **Auto rollback**: Any failure triggers automatic rollback of all changes (restores previous config on overwrite installs)
+- **Management CLI**: `proxy-manager` command for post-deploy administration (includes config test & subscription URL query)
+- **Key fallback**: Multiple X25519 extraction and validation modes (JSON, regex, OpenSSL local generation, etc.), compatible with different Xray version outputs
+
+## Supported Operating Systems
+
+| Distro | Version | Package Mgr | Init System | Notes |
+|--------|---------|-------------|-------------|-------|
+| Ubuntu | 16.04+ | apt | systemd | |
+| Debian | 9+ | apt | systemd | |
+| CentOS | 7+ | yum/dnf | systemd | |
+| RHEL | 7+ | yum/dnf | systemd | |
+| Rocky Linux | 8+ | dnf | systemd | |
+| AlmaLinux | 8+ | dnf | systemd | |
+| Anolis OS (龙蜥) | 8+ | dnf | systemd | |
+| Fedora | 29+ | dnf | systemd | |
+| openSUSE | Leap 15+ / Tumbleweed | zypper | systemd | |
+| Arch Linux / Manjaro | Rolling | pacman | systemd | |
+| Alpine Linux | 3.12+ | apk | OpenRC | bash required, OpenRC path not fully tested |
+| Amazon Linux | 2/2023 | yum/dnf | systemd | |
+| openEuler (欧拉) | 20.03+ | dnf | systemd | |
+
+> Container environments (OpenVZ/LXC): Swap creation failure will not abort deployment. Kernel 4.9+ required for BBR.
+
+## Important Notes
+
+- **Subscription is HTTP by default**: The generated subscription URL is `http://IP:10707/random-path`. HTTP is transmitted in plaintext and can be intercepted by middleboxes. Use it only on trusted networks, or download `/usr/share/nginx/html/clash.yaml` directly via SFTP/SCP. HTTPS requires your own domain and certificate. The safest option is to avoid the public subscription URL entirely and copy the config file locally with SFTP/SCP.
+- **TLS nodes need skip-cert-verify**: Port 8443 uses a self-signed certificate; clients must enable `skip-cert-verify`.
+- **Reality is the primary node**: The 443 Reality node requires no extra settings and is recommended for daily use; TLS and XHTTP serve as backup/compatibility nodes.
 
 ## Installation Process
 

@@ -12,56 +12,6 @@ VLESS + Reality + Vision + Fragment 跨境电商网络代理一键部署脚本�
 
 [![GitHub](https://img.shields.io/badge/GitHub-Evergreen05/xray--proxy--install-blue?logo=github)](https://github.com/Evergreen05/xray-proxy-install)
 
-## 功能特性
-
-- **多协议节点**：Reality+Vision（主力/防探测）、VLESS+TLS（备用）、XHTTP+Reality（CDN兼容）；Fragment 分片在客户端订阅配置中生效
-- **单域名单端口 Reality**：默认伪装目标为 `cdn-dynmedia-1.microsoft.com:443`，一机仅暴露一个真实存在的微软动态媒体 CDN 证书，避免多端口/多公司站点被主动探测识别
-- **dest 部署时自动预检**：Step 7 用 `openssl s_client -tls1_3 -alpn h2` 实测目标，不满足则剔除；全部失败时从备用池自动替补；仍失败则告警继续部署不阻断
-- **DNS 优化**：Clash 端 fake-ip + fallback-filter 防污染；服务端 Xray 内置 DoH 解析
-- **自动 BBR 优化**：根据用户输入的带宽（Mbps）智能计算 TCP 缓冲区和连接队列参数（100ms RTT 公式）
-- **Swap 配置**：交互模式下询问是否配置及大小（MB），推荐值为物理内存 2 倍；无人值守模式跳过（容器环境创建失败不中断部署）
-- **Clash 订阅**：自动生成 Clash Meta 格式订阅文件，通过 Nginx 提供 HTTP 下载端点
-- **VLESS 通用订阅**：同时生成 `vless://` 链接的 base64 订阅（`nodes.txt` / `<sub-path>-vless` 端点），兼容 v2rayN/v2rayNG/Shadowrocket 旧版等不支持 Clash Meta YAML 的客户端
-- **智能分流规则**：基于 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules)（⭐ ~27.6k），每日自动更新，白名单模式精确国内外分流
-- **自动证书**：ECC P-256 自签名证书（SAN 覆盖全部伪装域名），安全权限设置
-- **版本固定**：Xray-core 固定版本安装（v26.3.27），失败自动回退最新版
-- **配置预检**：部署时 jq 验证 JSON + `xray run -test` 语义校验，不合格不启动
-- **时钟检测**：部署前检查 NTP 同步状态（Reality 握手对时间敏感）
-- **启动自愈**：Xray 启动失败时自动修复证书权限并重试
-- **跨平台兼容**：支持 apt/dnf/yum/pacman/zypper/apk 六大包管理器（Alpine 需预先安装 bash，且未经充分测试）
-- **跨服务管理**：支持 systemd/sysvinit/OpenRC 三种服务管理器
-- **防火墙自动放行**：自动配置 ufw/firewalld/iptables（含规则持久化）
-- **SELinux 兼容**：CentOS/RHEL/Anolis 自动设置 httpd_sys_content_t 上下文
-- **失败自动回滚**：部署过程中任意步骤失败自动回滚所有变更（覆盖安装时还原旧配置）
-- **管理脚本**：部署后提供 `proxy-manager` 命令管理服务（含配置测试、订阅地址查询）
-- **密钥兜底**：多种 X25519 密钥提取与校验模式（含 JSON、正则、OpenSSL 本地生成等 5 种兜底），兼容不同 Xray 版本输出
-
-## 支持的操作系统
-
-| 发行版 | 版本要求 | 包管理器 | 服务管理器 | 备注 |
-|-------|---------|---------|-----------|------|
-| Ubuntu | 16.04+ | apt | systemd | |
-| Debian | 9+ | apt | systemd | |
-| CentOS | 7+ | yum/dnf | systemd | |
-| RHEL | 7+ | yum/dnf | systemd | |
-| Rocky Linux | 8+ | dnf | systemd | |
-| AlmaLinux | 8+ | dnf | systemd | |
-| Anolis OS（龙蜥） | 8+ | dnf | systemd | |
-| Fedora | 29+ | dnf | systemd | |
-| openSUSE | Leap 15+ / Tumbleweed | zypper | systemd | |
-| Arch Linux / Manjaro | 滚动版 | pacman | systemd | |
-| Alpine Linux | 3.12+ | apk | OpenRC | 需预装 bash，OpenRC 路径未经充分测试 |
-| Amazon Linux | 2/2023 | yum/dnf | systemd | |
-| openEuler（欧拉） | 20.03+ | dnf | systemd | |
-
-> 容器环境（OpenVZ/LXC）下 Swap 创建失败不会中断部署；内核需 4.9+ 以支持 BBR。
-
-## 重要提示
-
-- **订阅默认走 HTTP**：部署完成后生成的订阅链接是 `http://IP:10707/随机路径`。HTTP 明文传输可能被中间人截获，建议仅在可信网络使用，或通过 SFTP/SCP 直接下载 `/usr/share/nginx/html/clash.yaml` 到本地。如需 HTTPS 必须自备域名和证书。最安全的做法是不通过公网订阅链接，直接用 SFTP/SCP 把配置文件拉到本地。
-- **TLS 节点需跳过证书校验**：8443 端口使用自签名证书，客户端必须开启 `skip-cert-verify`。
-- **Reality 是主力节点**：443 端口 Reality 节点无需额外设置，推荐日常使用；TLS 与 XHTTP 作为备用/兼容性节点。
-
 ## 快速开始
 
 ### 前置条件
@@ -111,6 +61,56 @@ bash install.sh
 ```
 
 > **提示**：部署完成后，执行 `proxy-manager info` 查看订阅地址和节点参数。
+
+## 功能特性
+
+- **多协议节点**：Reality+Vision（主力/防探测）、VLESS+TLS（备用）、XHTTP+Reality（CDN兼容）；Fragment 分片在客户端订阅配置中生效
+- **单域名单端口 Reality**：默认伪装目标为 `cdn-dynmedia-1.microsoft.com:443`，一机仅暴露一个真实存在的微软动态媒体 CDN 证书，避免多端口/多公司站点被主动探测识别
+- **dest 部署时自动预检**：Step 7 用 `openssl s_client -tls1_3 -alpn h2` 实测目标，不满足则剔除；全部失败时从备用池自动替补；仍失败则告警继续部署不阻断
+- **DNS 优化**：Clash 端 fake-ip + fallback-filter 防污染；服务端 Xray 内置 DoH 解析
+- **自动 BBR 优化**：根据用户输入的带宽（Mbps）智能计算 TCP 缓冲区和连接队列参数（100ms RTT 公式）
+- **Swap 配置**：交互模式下询问是否配置及大小（MB），推荐值为物理内存 2 倍；无人值守模式跳过（容器环境创建失败不中断部署）
+- **Clash 订阅**：自动生成 Clash Meta 格式订阅文件，通过 Nginx 提供 HTTP 下载端点
+- **VLESS 通用订阅**：同时生成 `vless://` 链接的 base64 订阅（`nodes.txt` / `<sub-path>-vless` 端点），兼容 v2rayN/v2rayNG/Shadowrocket 旧版等不支持 Clash Meta YAML 的客户端
+- **智能分流规则**：基于 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules)（⭐ ~27.6k），每日自动更新，白名单模式精确国内外分流
+- **自动证书**：ECC P-256 自签名证书（SAN 覆盖全部伪装域名），安全权限设置
+- **版本固定**：Xray-core 固定版本安装（v26.3.27），失败自动回退最新版
+- **配置预检**：部署时 jq 验证 JSON + `xray run -test` 语义校验，不合格不启动
+- **时钟检测**：部署前检查 NTP 同步状态（Reality 握手对时间敏感）
+- **启动自愈**：Xray 启动失败时自动修复证书权限并重试
+- **跨平台兼容**：支持 apt/dnf/yum/pacman/zypper/apk 六大包管理器（Alpine 需预先安装 bash，且未经充分测试）
+- **跨服务管理**：支持 systemd/sysvinit/OpenRC 三种服务管理器
+- **防火墙自动放行**：自动配置 ufw/firewalld/iptables（含规则持久化）
+- **SELinux 兼容**：CentOS/RHEL/Anolis 自动设置 httpd_sys_content_t 上下文
+- **失败自动回滚**：部署过程中任意步骤失败自动回滚所有变更（覆盖安装时还原旧配置）
+- **管理脚本**：部署后提供 `proxy-manager` 命令管理服务（含配置测试、订阅地址查询）
+- **密钥兜底**：多种 X25519 密钥提取与校验模式（含 JSON、正则、OpenSSL 本地生成等 5 种兜底），兼容不同 Xray 版本输出
+
+## 支持的操作系统
+
+| 发行版 | 版本要求 | 包管理器 | 服务管理器 | 备注 |
+|-------|---------|---------|-----------|------|
+| Ubuntu | 16.04+ | apt | systemd | |
+| Debian | 9+ | apt | systemd | |
+| CentOS | 7+ | yum/dnf | systemd | |
+| RHEL | 7+ | yum/dnf | systemd | |
+| Rocky Linux | 8+ | dnf | systemd | |
+| AlmaLinux | 8+ | dnf | systemd | |
+| Anolis OS（龙蜥） | 8+ | dnf | systemd | |
+| Fedora | 29+ | dnf | systemd | |
+| openSUSE | Leap 15+ / Tumbleweed | zypper | systemd | |
+| Arch Linux / Manjaro | 滚动版 | pacman | systemd | |
+| Alpine Linux | 3.12+ | apk | OpenRC | 需预装 bash，OpenRC 路径未经充分测试 |
+| Amazon Linux | 2/2023 | yum/dnf | systemd | |
+| openEuler（欧拉） | 20.03+ | dnf | systemd | |
+
+> 容器环境（OpenVZ/LXC）下 Swap 创建失败不会中断部署；内核需 4.9+ 以支持 BBR。
+
+## 重要提示
+
+- **订阅默认走 HTTP**：部署完成后生成的订阅链接是 `http://IP:10707/随机路径`。HTTP 明文传输可能被中间人截获，建议仅在可信网络使用，或通过 SFTP/SCP 直接下载 `/usr/share/nginx/html/clash.yaml` 到本地。如需 HTTPS 必须自备域名和证书。最安全的做法是不通过公网订阅链接，直接用 SFTP/SCP 把配置文件拉到本地。
+- **TLS 节点需跳过证书校验**：8443 端口使用自签名证书，客户端必须开启 `skip-cert-verify`。
+- **Reality 是主力节点**：443 端口 Reality 节点无需额外设置，推荐日常使用；TLS 与 XHTTP 作为备用/兼容性节点。
 
 ## 部署流程
 
