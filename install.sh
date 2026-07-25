@@ -328,43 +328,47 @@ echo -e "${GREEN}物理内存:${NC}  ${TOTAL_RAM_MB} MB"
 echo -e "${GREEN}Swap 大小:${NC} ${TOTAL_SWAP_MB} MB"
 echo ""
 
-if [ "$TOTAL_SWAP_MB" -ge 2048 ]; then
-    log "Swap 大小符合要求 (${TOTAL_SWAP_MB} MB >= 2048 MB)"
+if [ "$AUTO_YES" -eq 1 ]; then
+    # 无人值守模式：不配置虚拟内存，跳过
+    log "无人值守模式，跳过 Swap 配置"
 else
-    warn "Swap 大小不足 (${TOTAL_SWAP_MB} MB < 2048 MB)，低内存服务器建议配置 2GB Swap"
-    echo ""
-    echo -e "${YELLOW}是否配置 2GB Swap 虚拟内存？${NC}"
-    echo -e "  ${GREEN}y${NC} - 配置（推荐 1G 内存服务器）"
-    echo -e "  ${GREEN}n${NC} - 跳过（已有足够内存）"
-    if [ "$AUTO_YES" -eq 1 ]; then
-        CONFIG_SWAP="y"
-    else
-        # || 兜底：非交互场景（管道/重定向）下 read 遇到 EOF 返回非 0，set -e 会静默退出
-        read -r -p "请选择 [y/n]: " CONFIG_SWAP || CONFIG_SWAP=""
-        CONFIG_SWAP=${CONFIG_SWAP:-n}
-    fi
+    echo -e "${YELLOW}是否配置 Swap 虚拟内存？${NC}"
+    echo -e "  ${GREEN}y${NC} - 配置（推荐物理内存 ≤ 2GB 的服务器）"
+    echo -e "  ${GREEN}n${NC} - 跳过"
+    read -r -p "请选择 [y/n]: " CONFIG_SWAP || CONFIG_SWAP=""
+    CONFIG_SWAP=${CONFIG_SWAP:-n}
 
     if [[ "$CONFIG_SWAP" == "y" || "$CONFIG_SWAP" == "Y" ]]; then
-        log "开始配置 2GB Swap..."
+        # 推荐值：物理内存的 2 倍，上限 4096MB，下限 512MB
+        RECOMMEND_SWAP=$(( TOTAL_RAM_MB * 2 ))
+        [ "$RECOMMEND_SWAP" -gt 4096 ] && RECOMMEND_SWAP=4096
+        [ "$RECOMMEND_SWAP" -lt 512 ] && RECOMMEND_SWAP=512
+        echo -e "${CYAN}请输入 Swap 大小（MB），推荐 ${RECOMMEND_SWAP} MB：${NC}"
+        read -r -p "Swap 大小 [MB]: " SWAP_SIZE_MB || SWAP_SIZE_MB=""
+        SWAP_SIZE_MB=${SWAP_SIZE_MB:-$RECOMMEND_SWAP}
+        # 校验输入为纯数字，否则回退推荐值
+        if ! [[ "$SWAP_SIZE_MB" =~ ^[0-9]+$ ]]; then
+            warn "输入无效，使用推荐值 ${RECOMMEND_SWAP} MB"
+            SWAP_SIZE_MB=$RECOMMEND_SWAP
+        fi
+        [ "$SWAP_SIZE_MB" -lt 64 ] && SWAP_SIZE_MB=64
+
+        log "开始配置 ${SWAP_SIZE_MB} MB Swap..."
         SWAP_OK=0
 
-        # 磁盘空间预检：2GB swap 文件至少需要 2200MB 余量（含 mkswap 开销）
+        # 磁盘空间预检（含 mkswap 开销，多留 200MB）
         AVAIL_MB=$(df -m / 2>/dev/null | awk 'NR==2{print $4}')
-        if [ -n "$AVAIL_MB" ] && [ "$AVAIL_MB" -lt 2200 ]; then
-            warn "根分区剩余空间不足 (${AVAIL_MB} MB < 2200 MB)，Swap 创建可能失败"
+        if [ -n "$AVAIL_MB" ] && [ "$AVAIL_MB" -lt $((SWAP_SIZE_MB + 200)) ]; then
+            warn "根分区剩余空间不足 (${AVAIL_MB} MB < $((SWAP_SIZE_MB + 200)) MB)，Swap 创建可能失败"
         fi
 
         if [ -f /swapfile ]; then
             warn "检测到已存在 /swapfile"
-            SWAP_SIZE=$(ls -lh /swapfile | awk '{print $5}')
-            echo -e "当前大小: ${SWAP_SIZE}"
-            if [ "$AUTO_YES" -eq 1 ]; then
-                RECREATE_SWAP="n"
-            else
-                echo -e "${YELLOW}是否重新创建？(y/n)${NC}"
-                read -r -p "请选择: " RECREATE_SWAP || RECREATE_SWAP=""
-                RECREATE_SWAP=${RECREATE_SWAP:-n}
-            fi
+            SWAP_CUR_SIZE=$(ls -lh /swapfile | awk '{print $5}')
+            echo -e "当前大小: ${SWAP_CUR_SIZE}"
+            echo -e "${YELLOW}是否重新创建为 ${SWAP_SIZE_MB} MB？(y/n)${NC}"
+            read -r -p "请选择: " RECREATE_SWAP || RECREATE_SWAP=""
+            RECREATE_SWAP=${RECREATE_SWAP:-n}
             if [[ "$RECREATE_SWAP" != "y" && "$RECREATE_SWAP" != "Y" ]]; then
                 log "保留现有 Swap"
                 if swapon /swapfile 2>/dev/null; then
@@ -377,7 +381,7 @@ else
             else
                 swapoff /swapfile 2>/dev/null || true
                 rm -f /swapfile
-                fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
+                fallocate -l "${SWAP_SIZE_MB}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_SIZE_MB" status=progress
                 chmod 600 /swapfile
                 mkswap /swapfile
                 if swapon /swapfile 2>/dev/null; then
@@ -390,11 +394,11 @@ else
                 if [ "$SWAP_OK" -eq 1 ] && ! grep -q '/swapfile' /etc/fstab; then
                     echo '/swapfile none swap sw,nofail 0 0' >> /etc/fstab
                 fi
-                [ "$SWAP_OK" -eq 1 ] && log "2GB Swap 创建成功"
+                [ "$SWAP_OK" -eq 1 ] && log "${SWAP_SIZE_MB} MB Swap 创建成功"
             fi
         else
-            log "创建 2GB Swap 文件..."
-            fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
+            log "创建 ${SWAP_SIZE_MB} MB Swap 文件..."
+            fallocate -l "${SWAP_SIZE_MB}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_SIZE_MB" status=progress
             chmod 600 /swapfile
             mkswap /swapfile
             if swapon /swapfile 2>/dev/null; then
@@ -407,7 +411,7 @@ else
             if [ "$SWAP_OK" -eq 1 ] && ! grep -q '/swapfile' /etc/fstab; then
                 echo '/swapfile none swap sw,nofail 0 0' >> /etc/fstab
             fi
-            [ "$SWAP_OK" -eq 1 ] && log "2GB Swap 创建成功"
+            [ "$SWAP_OK" -eq 1 ] && log "${SWAP_SIZE_MB} MB Swap 创建成功"
         fi
 
         TOTAL_SWAP_MB=$(awk '/SwapTotal/ {print int($2/1024)}' /proc/meminfo)
@@ -417,7 +421,7 @@ else
         echo -e "  Swap 大小: ${TOTAL_SWAP_MB} MB"
         echo -e "  总可用: $((TOTAL_RAM_MB + TOTAL_SWAP_MB)) MB"
     else
-        warn "已跳过 Swap 配置，低内存环境下可能影响性能"
+        log "已跳过 Swap 配置"
     fi
 fi
 
@@ -552,6 +556,45 @@ TCP_MEM_LOW=$(( TOTAL_RAM_MB * 256 / 4 ))
 TCP_MEM_PRESSURE=$(( TOTAL_RAM_MB * 512 / 4 ))
 TCP_MEM_HIGH=$(( TOTAL_RAM_MB * 768 / 4 ))
 
+# 根据用户带宽智能计算 TCP 缓冲区和连接队列
+# 公式：缓冲区 = 带宽(Mbps) × 1000000 / 8 × 0.1s(100ms RTT) = 带宽 × 12500 字节
+if [ "$AUTO_YES" -eq 1 ]; then
+    # 无人值守模式：使用默认参数（200Mbps 基准，4MB 缓冲区为预设默认值）
+    BANDWIDTH_MBPS=200
+    TCP_BUF_MAX=4194304
+    QUEUE_SIZE=8192
+    log "无人值守模式，使用默认网络参数（200Mbps 基准）"
+else
+    echo ""
+    echo -e "${CYAN}请输入服务器带宽（用于智能计算 TCP 缓冲区）：${NC}"
+    echo -e "  常见值: ${GREEN}100${NC}(百兆) / ${GREEN}200${NC} / ${GREEN}500${NC} / ${GREEN}1000${NC}(千兆)"
+    read -r -p "带宽 [Mbps，默认 200]: " BANDWIDTH_MBPS || BANDWIDTH_MBPS=""
+    BANDWIDTH_MBPS=${BANDWIDTH_MBPS:-200}
+    if ! [[ "$BANDWIDTH_MBPS" =~ ^[0-9]+$ ]]; then
+        warn "输入无效，使用默认 200 Mbps"
+        BANDWIDTH_MBPS=200
+    fi
+    [ "$BANDWIDTH_MBPS" -lt 10 ] && BANDWIDTH_MBPS=10
+    [ "$BANDWIDTH_MBPS" -gt 10000 ] && BANDWIDTH_MBPS=10000
+
+    # 缓冲区 = 带宽 × 12500 字节（100ms RTT），上限 64MB，下限 1MB
+    TCP_BUF_MAX=$(( BANDWIDTH_MBPS * 12500 ))
+    [ "$TCP_BUF_MAX" -gt 67108864 ] && TCP_BUF_MAX=67108864
+    [ "$TCP_BUF_MAX" -lt 1048576 ] && TCP_BUF_MAX=1048576
+
+    # 连接队列随带宽缩放
+    if [ "$BANDWIDTH_MBPS" -le 200 ]; then
+        QUEUE_SIZE=8192
+    elif [ "$BANDWIDTH_MBPS" -le 1000 ]; then
+        QUEUE_SIZE=16384
+    else
+        QUEUE_SIZE=32768
+    fi
+
+    TCP_BUF_MB=$(( TCP_BUF_MAX / 1048576 ))
+    log "带宽: ${BANDWIDTH_MBPS} Mbps → TCP 缓冲区: ${TCP_BUF_MB} MB, 连接队列: ${QUEUE_SIZE}"
+fi
+
 # 备份原始配置（每次部署生成时间戳备份，仅保留最近 3 份，避免无限累积）
 cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%s) 2>/dev/null || true
 ( ls -1t /etc/sysctl.conf.bak.* 2>/dev/null || true ) | tail -n +4 | xargs -r rm -f 2>/dev/null || true
@@ -559,20 +602,20 @@ add_rollback "rm -f /etc/sysctl.d/99-proxy-optimized.conf; sysctl --system >/dev
 
 cat > /etc/sysctl.d/99-proxy-optimized.conf << 'SYSCTL'
 # ============================================
-# 网络内核优化 (适配 200M 带宽)
+# 网络内核优化 (适配 __BANDWIDTH__Mbps 带宽, 100ms RTT)
 # ============================================
 
 # --- BBR 拥塞控制 ---
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 
-# --- TCP 缓冲区 (4MB，平衡内存与性能) ---
+# --- TCP 缓冲区 (根据带宽智能计算) ---
 net.core.rmem_default=262144
 net.core.wmem_default=262144
-net.core.rmem_max=4194304
-net.core.wmem_max=4194304
-net.ipv4.tcp_rmem=4096 87380 4194304
-net.ipv4.tcp_wmem=4096 65536 4194304
+net.core.rmem_max=__TCP_BUF_MAX__
+net.core.wmem_max=__TCP_BUF_MAX__
+net.ipv4.tcp_rmem=4096 87380 __TCP_BUF_MAX__
+net.ipv4.tcp_wmem=4096 65536 __TCP_BUF_MAX__
 net.ipv4.tcp_mem=__TCP_MEM_DYNAMIC__
 
 # --- TCP Fast Open ---
@@ -600,11 +643,11 @@ net.ipv4.tcp_timestamps=1
 net.ipv4.tcp_sack=1
 net.ipv4.tcp_dsack=1
 
-# --- 连接队列 ---
-net.core.netdev_max_backlog=8192
-net.core.somaxconn=8192
-net.ipv4.tcp_max_orphans=8192
-net.ipv4.tcp_max_syn_backlog=8192
+# --- 连接队列 (随带宽缩放) ---
+net.core.netdev_max_backlog=__QUEUE_SIZE__
+net.core.somaxconn=__QUEUE_SIZE__
+net.ipv4.tcp_max_orphans=__QUEUE_SIZE__
+net.ipv4.tcp_max_syn_backlog=__QUEUE_SIZE__
 
 # --- SYN flood 防护 ---
 net.ipv4.tcp_syncookies=1
@@ -631,16 +674,19 @@ net.ipv4.icmp_echo_ignore_broadcasts=1
 net.ipv4.icmp_ignore_bogus_error_responses=1
 
 # --- UDP 缓冲区（代理 UDP 中继/QUIC/语音视频时减少丢包）---
-net.core.rmem_udp_max=4194304
-net.core.wmem_udp_max=4194304
+net.core.rmem_udp_max=__TCP_BUF_MAX__
+net.core.wmem_udp_max=__TCP_BUF_MAX__
 
 # --- Swap 优化 ---
 vm.swappiness=10
 vm.vfs_cache_pressure=50
 SYSCTL
 
-# 替换 tcp_mem 为动态计算值
+# 替换动态计算值
 sed -i "s/__TCP_MEM_DYNAMIC__/${TCP_MEM_LOW} ${TCP_MEM_PRESSURE} ${TCP_MEM_HIGH}/" /etc/sysctl.d/99-proxy-optimized.conf
+sed -i "s/__TCP_BUF_MAX__/${TCP_BUF_MAX}/g" /etc/sysctl.d/99-proxy-optimized.conf
+sed -i "s/__QUEUE_SIZE__/${QUEUE_SIZE}/g" /etc/sysctl.d/99-proxy-optimized.conf
+sed -i "s/__BANDWIDTH__/${BANDWIDTH_MBPS}/g" /etc/sysctl.d/99-proxy-optimized.conf
 
 sysctl --system >/dev/null 2>&1 || true
 

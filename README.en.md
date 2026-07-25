@@ -18,8 +18,8 @@ VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e
 - **Single-domain, single-port Reality**: Default fronting target is `cdn-dynmedia-1.microsoft.com:443`. The server only exposes one real Microsoft dynamic media CDN certificate on 443, avoiding the strong active-probing signature of multi-port/multi-site setups
 - **Dest preflight at deploy time**: Step 7 uses `openssl s_client -tls1_3 -alpn h2` to verify the target. Failing domains are dropped; if all fail, the script auto-falls back through the backup pool. If the pool also fails, it warns and continues without blocking deployment
 - **DNS optimization**: Client-side fake-ip + fallback-filter anti-pollution; server-side Xray built-in DoH resolution
-- **Auto BBR optimization**: Dynamic TCP buffer calculation based on available memory
-- **Auto Swap**: Prompts to configure 2GB Swap when Swap is below 2GB (creation failure in container environments does not abort deployment)
+- **Auto BBR optimization**: Intelligently calculates TCP buffer and connection queue parameters based on user-input bandwidth (Mbps) using a 100ms RTT formula
+- **Swap configuration**: Interactive mode asks whether to configure and how much (MB), recommended at 2× physical RAM; unattended mode (-y) skips entirely (creation failure in containers does not abort deployment)
 - **Clash subscription**: Auto-generates Clash Meta format subscription via Nginx HTTP endpoint
 - **VLESS universal subscription**: Also generates base64-encoded `vless://` links (`nodes.txt` / `<sub-path>-vless` endpoint) for clients that do not support Clash Meta YAML (v2rayN/v2rayNG/Shadowrocket legacy versions)
 - **Smart routing rules**: Powered by [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) (⭐ ~27.6k), auto-updated daily, whitelist mode with precise geo-routing
@@ -88,7 +88,7 @@ wget -qO- https://raw.githubusercontent.com/Evergreen05/xray-proxy-install/main/
 
 ### Option 2: Unattended Install (-y flag)
 
-Skips all interactive prompts (does **not** auto-update system packages; configures Swap if needed). `-y` mode is intended for repeated deployments or CI scenarios, avoiding unattended full system upgrades that could interrupt services. To upgrade system packages as well, use interactive mode and select yes manually:
+Skips all interactive prompts (does **not** auto-update system packages, does **not** configure Swap, uses 200Mbps default network parameters). `-y` mode is intended for repeated deployments or CI scenarios. To customize Swap size or network parameters, use interactive mode:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Evergreen05/xray-proxy-install/main/install.sh) -y
@@ -120,10 +120,10 @@ The script runs through **14 steps** (plus a pre-check and final output):
 |------|-------------|
 | Pre | Root privilege check & distro detection |
 | 1 | Acquire public IP + NTP clock sync check |
-| 2 | Memory check & Swap configuration |
+| 2 | Memory check & Swap configuration (interactive: asks whether to configure and size; -y: skips) |
 | 3 | Environment check & port conflict detection (stop old services, cleanup, backup old config) |
 | 4 | System update & dependency installation |
-| 5 | Network kernel optimization (BBR/TCP/Files) |
+| 5 | Network kernel optimization (BBR/TCP/file descriptors; interactive: asks bandwidth for smart calculation; -y: uses defaults) |
 | 6 | Install Xray-core (pinned version, fallback to latest) |
 | 7 | Generate UUID, X25519 keypair, Short ID, subscription path; **preflight Reality dest (TLS1.3 + h2), auto-fallback to backup pool on failure** |
 | 8 | Generate Xray config (3 inbounds: Reality + TLS + XHTTP) + config pre-check |
@@ -212,6 +212,7 @@ The generated Clash subscription uses [Loyalsoldier/clash-rules](https://github.
 ### Client-side (Clash Meta / mihomo)
 
 - **fake-ip mode** (198.18.0.1/16): Faster connection setup; avoids connecting to poisoned IPs
+- **fake-ip-filter**: Windows NCSI detection domains (msftconnecttest.com) and Apple service domains always get real IPs, preventing Windows from falsely reporting "No internet access" after TUN mode is disabled
 - **Domestic nameservers**: 223.5.5.5 / 119.29.29.29 / 114.114.114.114 (plain UDP, fast resolution)
 - **Fallback**: `1.1.1.1` / `8.8.8.8` (plain UDP)
 - **fallback-filter**: GeoIP CN + geosite:gfw + 240.0.0.0/4 + specified domains (google/facebook/youtube) — blocked domains forced to fallback
@@ -278,17 +279,28 @@ The script generates two subscription formats — choose by client type:
 
 ## System Tuning Parameters
 
-The script auto-configures:
+The script intelligently calculates kernel parameters based on user-input bandwidth (interactive mode) or a default 200Mbps (unattended mode):
 
 - **BBR congestion control** + `fq` qdisc
-- **TCP buffers**: Dynamically calculated, 4MB max (balanced for memory and performance)
+- **TCP buffers**: Calculated from bandwidth (formula: bandwidth × 12500 bytes, 100ms RTT), capped at 64MB, floor at 1MB
+- **Connection queues**: Scale with bandwidth (≤200M: 8192 / ≤1000M: 16384 / >1000M: 32768)
+- **UDP buffers**: Scale in sync with TCP buffers to reduce UDP relay/QUIC packet loss
 - **TCP Fast Open**: Enabled
 - **MTU probing**: Automatic PMTU discovery
 - **File descriptors**: System-level 1,048,576; service-level 131,072
-- **Connection queues**: somaxconn=8192, tcp_max_syn_backlog=8192
 - **Swap optimization**: swappiness=10, vfs_cache_pressure=50
 - **Timestamps/SACK/Window scaling**: All enabled
 - **Security hardening**: Source routing/redirects disabled, SYN cookies enabled
+
+### Bandwidth Parameter Reference
+
+| Bandwidth | TCP Buffer | Conn Queue | Use Case |
+|-----------|-----------|------------|----------|
+| 100 Mbps | 1 MB | 8192 | Low-spec VPS |
+| 200 Mbps | 2 MB | 8192 | Standard proxy (default) |
+| 500 Mbps | 6 MB | 16384 | Mid-high spec server |
+| 1000 Mbps | 12 MB | 16384 | Gigabit server |
+| 2000+ Mbps | 25 MB | 32768 | 10G / high concurrency |
 
 ## Dependencies
 

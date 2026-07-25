@@ -18,8 +18,8 @@ VLESS + Reality + Vision + Fragment 跨境电商网络代理一键部署脚本�
 - **单域名单端口 Reality**：默认伪装目标为 `cdn-dynmedia-1.microsoft.com:443`，一机仅暴露一个真实存在的微软动态媒体 CDN 证书，避免多端口/多公司站点被主动探测识别
 - **dest 部署时自动预检**：Step 7 用 `openssl s_client -tls1_3 -alpn h2` 实测目标，不满足则剔除；全部失败时从备用池自动替补；仍失败则告警继续部署不阻断
 - **DNS 优化**：Clash 端 fake-ip + fallback-filter 防污染；服务端 Xray 内置 DoH 解析
-- **自动 BBR 优化**：根据内存动态计算 TCP 缓冲区参数
-- **自动 Swap 配置**：检测到 Swap 不足 2GB 时提示配置 2GB 虚拟内存（容器环境创建失败不中断部署）
+- **自动 BBR 优化**：根据用户输入的带宽（Mbps）智能计算 TCP 缓冲区和连接队列参数（100ms RTT 公式）
+- **Swap 配置**：交互模式下询问是否配置及大小（MB），推荐值为物理内存 2 倍；无人值守模式跳过（容器环境创建失败不中断部署）
 - **Clash 订阅**：自动生成 Clash Meta 格式订阅文件，通过 Nginx 提供 HTTP 下载端点
 - **VLESS 通用订阅**：同时生成 `vless://` 链接的 base64 订阅（`nodes.txt` / `<sub-path>-vless` 端点），兼容 v2rayN/v2rayNG/Shadowrocket 旧版等不支持 Clash Meta YAML 的客户端
 - **智能分流规则**：基于 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules)（⭐ ~27.6k），每日自动更新，白名单模式精确国内外分流
@@ -88,7 +88,7 @@ wget -qO- https://raw.githubusercontent.com/Evergreen05/xray-proxy-install/main/
 
 ### 方式二：无人值守安装（-y 参数）
 
-跳过所有交互提示，自动选择默认选项（**不自动更新系统包**，内存不足时配置 Swap）。`-y` 模式适合重复部署或 CI 场景，避免无人值守时执行全量系统升级导致意外中断。如需同时升级系统包，请使用交互模式并手动选择：
+跳过所有交互提示，自动选择默认选项（**不自动更新系统包**，**不配置 Swap**，网络参数使用 200Mbps 默认值）。`-y` 模式适合重复部署或 CI 场景，避免无人值守时执行全量系统升级导致意外中断。如需自定义 Swap 大小或网络参数，请使用交互模式：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Evergreen05/xray-proxy-install/main/install.sh) -y
@@ -120,10 +120,10 @@ bash install.sh
 |-----|------|
 | 预检 | 系统检测与权限检查（必须 root） |
 | 1 | 获取服务器公网 IP + NTP 时钟同步检测 |
-| 2 | 内存检查与 Swap 配置 |
+| 2 | 内存检查与 Swap 配置（交互模式询问是否配置及大小，-y 跳过） |
 | 3 | 环境检查与端口冲突检测（停止旧服务、清理残留、备份旧配置） |
 | 4 | 系统更新与依赖安装 |
-| 5 | 网络内核优化（BBR/TCP/文件描述符） |
+| 5 | 网络内核优化（BBR/TCP/文件描述符，交互模式询问带宽智能计算参数，-y 用默认值） |
 | 6 | 安装 Xray-core（固定版本，失败回退最新版） |
 | 7 | 生成 UUID、X25519 密钥对、Short ID、订阅路径；**预检 Reality dest（TLS1.3 + h2），失败自动从备用池替补** |
 | 8 | 生成 Xray 配置文件（3 个入站：Reality + TLS + XHTTP）+ 配置预检 |
@@ -212,6 +212,7 @@ bash install.sh
 ### 客户端（Clash Meta / mihomo）
 
 - **fake-ip 模式**（198.18.0.1/16）：加速连接建立，避免 DNS 污染导致连错 IP
+- **fake-ip-filter**：Windows NCSI 检测域名（msftconnecttest.com）和 Apple 服务域名始终获取真实 IP，避免 TUN 模式关闭后 Windows 误报“无法访问 Internet”
 - **国内 nameserver**：223.5.5.5 / 119.29.29.29 / 114.114.114.114（纯 UDP，解析快）
 - **fallback**：`1.1.1.1` / `8.8.8.8`（明文 UDP）
 - **fallback-filter**：GeoIP CN + geosite:gfw + 240.0.0.0/4 + 指定域名（google/facebook/youtube），被墙域名强制走 fallback 防污染
@@ -278,17 +279,28 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 
 ## 系统优化参数
 
-脚本自动配置以下内核参数：
+脚本根据用户输入的带宽（交互模式）或默认 200Mbps（无人值守模式）智能计算内核参数：
 
 - **BBR 拥塞控制** + `fq` 队列调度
-- **TCP 缓冲区**：动态计算，4MB 上限（平衡内存与性能）
+- **TCP 缓冲区**：根据带宽智能计算（公式：带宽 × 12500 字节，100ms RTT），上限 64MB，下限 1MB
+- **连接队列**：随带宽缩放（≤200M: 8192 / ≤1000M: 16384 / >1000M: 32768）
+- **UDP 缓冲区**：与 TCP 缓冲区同步缩放，减少 UDP 中继/QUIC 丢包
 - **TCP Fast Open**：启用 TFO
 - **MTU 探测**：自动 PMTU 发现
 - **文件描述符**：系统级 1048576，服务级 131072
-- **连接队列**：somaxconn=8192，tcp_max_syn_backlog=8192
 - **Swap 优化**：swappiness=10，vfs_cache_pressure=50
 - **时间戳/SACK/窗口缩放**：全部启用
 - **安全加固**：禁用源路由、重定向，启用 SYN Cookie
+
+### 带宽参数对照表
+
+| 带宽 | TCP 缓冲区 | 连接队列 | 适用场景 |
+|------|-----------|---------|----------|
+| 100 Mbps | 1 MB | 8192 | 低配 VPS |
+| 200 Mbps | 2 MB | 8192 | 常规代理（默认） |
+| 500 Mbps | 6 MB | 16384 | 中高配服务器 |
+| 1000 Mbps | 12 MB | 16384 | 千兆服务器 |
+| 2000+ Mbps | 25 MB | 32768 | 万兆/高并发 |
 
 ## 安装依赖
 
