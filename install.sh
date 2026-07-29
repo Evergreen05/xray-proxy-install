@@ -856,6 +856,35 @@ SUB_PATH=$(openssl rand -hex 8 2>/dev/null || true)
 [ -z "$SUB_PATH" ] && SUB_PATH=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -dc 'a-f0-9' | head -c 16 || true)
 [ -z "$SUB_PATH" ] && error "订阅路径生成失败"
 
+# 询问是否自定义订阅路径名称（无人值守模式跳过，使用随机路径）
+if [ "$AUTO_YES" -eq 0 ]; then
+    echo ""
+    echo -e "${YELLOW}是否自定义订阅路径名称？${NC}"
+    echo -e "  ${GREEN}y${NC} - 自定义（便于记忆，如 my-sub）"
+    echo -e "  ${GREEN}n${NC} - 使用随机路径（默认，更安全）"
+    read -r -p "请选择 [y/n]: " CUSTOM_SUB_CHOICE || CUSTOM_SUB_CHOICE=""
+    CUSTOM_SUB_CHOICE=${CUSTOM_SUB_CHOICE:-n}
+
+    if [[ "$CUSTOM_SUB_CHOICE" == "y" || "$CUSTOM_SUB_CHOICE" == "Y" ]]; then
+        while true; do
+            echo -e "${YELLOW}请输入订阅路径名称（纯英文/数字/连字符/下划线，4-32 字符）:${NC}"
+            read -r -p "订阅路径: " SUB_PATH_INPUT || SUB_PATH_INPUT=""
+            # 校验：只允许 a-zA-Z0-9_-，长度 4-32；排除保留词
+            if [ -n "$SUB_PATH_INPUT" ] && \
+               echo "$SUB_PATH_INPUT" | grep -qE '^[a-zA-Z0-9_][a-zA-Z0-9_-]{3,31}$' && \
+               ! echo "$SUB_PATH_INPUT" | grep -qiE '^(clash|nodes|vless|nodes_base64)$'; then
+                SUB_PATH="$SUB_PATH_INPUT"
+                log "订阅路径已设置为: ${SUB_PATH}"
+                break
+            else
+                warn "输入无效，请使用纯英文/数字/连字符/下划线，4-32 字符，不以连字符开头，且不能为保留词(clash/nodes/vless)"
+            fi
+        done
+    else
+        log "使用随机订阅路径: ${SUB_PATH}"
+    fi
+fi
+
 # ============================================
 # Reality 伪装目标(dest)预检：必须支持 TLS1.3 + h2(ALPN) + X25519
 # 不可用的域名直接剔除；全部失败时从备用池自动替补；
