@@ -1592,10 +1592,11 @@ sleep 1
 # WEB_ROOT 已在 Clash 配置步骤中确定，确保目录存在
 mkdir -p "$WEB_ROOT"
 
-# 订阅显示名称：自定义则用自定义名+扩展名，否则用默认文件名
+# 订阅显示名称：自定义则用纯名称（不带扩展名，客户端按 Content-Type/内容识别格式），
+# 否则用默认文件名（带扩展名，兼容性最佳）
 if [ -n "$SUB_DISPLAY_NAME" ]; then
-    CLASH_SUB_FILENAME="${SUB_DISPLAY_NAME}.yaml"
-    VLESS_SUB_FILENAME="${SUB_DISPLAY_NAME}.txt"
+    CLASH_SUB_FILENAME="${SUB_DISPLAY_NAME}"
+    VLESS_SUB_FILENAME="${SUB_DISPLAY_NAME}"
 else
     CLASH_SUB_FILENAME="clash.yaml"
     VLESS_SUB_FILENAME="nodes.txt"
