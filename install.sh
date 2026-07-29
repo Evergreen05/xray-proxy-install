@@ -856,32 +856,31 @@ SUB_PATH=$(openssl rand -hex 8 2>/dev/null || true)
 [ -z "$SUB_PATH" ] && SUB_PATH=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -dc 'a-f0-9' | head -c 16 || true)
 [ -z "$SUB_PATH" ] && error "订阅路径生成失败"
 
-# 询问是否自定义订阅路径名称（无人值守模式跳过，使用随机路径）
+# 询问是否自定义订阅显示名称（客户端导入后显示的名称，来自 Content-Disposition filename）
+# 无人值守模式跳过，使用默认值 clash.yaml / nodes.txt
+SUB_DISPLAY_NAME=""
 if [ "$AUTO_YES" -eq 0 ]; then
     echo ""
-    echo -e "${YELLOW}是否自定义订阅路径名称？${NC}"
-    echo -e "  ${GREEN}y${NC} - 自定义（便于记忆，如 my-sub）"
-    echo -e "  ${GREEN}n${NC} - 使用随机路径（默认，更安全）"
-    read -r -p "请选择 [y/n]: " CUSTOM_SUB_CHOICE || CUSTOM_SUB_CHOICE=""
-    CUSTOM_SUB_CHOICE=${CUSTOM_SUB_CHOICE:-n}
+    echo -e "${YELLOW}是否自定义订阅显示名称？${NC}"
+    echo -e "  ${GREEN}y${NC} - 自定义（客户端导入后显示该名称，如 MyProxy）"
+    echo -e "  ${GREEN}n${NC} - 使用默认（clash.yaml / nodes.txt）"
+    read -r -p "请选择 [y/n]: " CUSTOM_NAME_CHOICE || CUSTOM_NAME_CHOICE=""
+    CUSTOM_NAME_CHOICE=${CUSTOM_NAME_CHOICE:-n}
 
-    if [[ "$CUSTOM_SUB_CHOICE" == "y" || "$CUSTOM_SUB_CHOICE" == "Y" ]]; then
+    if [[ "$CUSTOM_NAME_CHOICE" == "y" || "$CUSTOM_NAME_CHOICE" == "Y" ]]; then
         while true; do
-            echo -e "${YELLOW}请输入订阅路径名称（纯英文/数字/连字符/下划线，4-32 字符）:${NC}"
-            read -r -p "订阅路径: " SUB_PATH_INPUT || SUB_PATH_INPUT=""
-            # 校验：只允许 a-zA-Z0-9_-，长度 4-32；排除保留词
-            if [ -n "$SUB_PATH_INPUT" ] && \
-               echo "$SUB_PATH_INPUT" | grep -qE '^[a-zA-Z0-9_][a-zA-Z0-9_-]{3,31}$' && \
-               ! echo "$SUB_PATH_INPUT" | grep -qiE '^(clash|nodes|vless|nodes_base64)$'; then
-                SUB_PATH="$SUB_PATH_INPUT"
-                log "订阅路径已设置为: ${SUB_PATH}"
+            echo -e "${YELLOW}请输入订阅显示名称（纯英文/数字/连字符/下划线，2-32 字符，无需扩展名）:${NC}"
+            read -r -p "订阅名称: " SUB_NAME_INPUT || SUB_NAME_INPUT=""
+            # 校验：只允许 a-zA-Z0-9_-，长度 2-32
+            if [ -n "$SUB_NAME_INPUT" ] && \
+               echo "$SUB_NAME_INPUT" | grep -qE '^[a-zA-Z0-9_][a-zA-Z0-9_-]{1,31}$'; then
+                SUB_DISPLAY_NAME="$SUB_NAME_INPUT"
+                log "订阅显示名称已设置为: ${SUB_DISPLAY_NAME}"
                 break
             else
-                warn "输入无效，请使用纯英文/数字/连字符/下划线，4-32 字符，不以连字符开头，且不能为保留词(clash/nodes/vless)"
+                warn "输入无效，请使用纯英文/数字/连字符/下划线，2-32 字符，不以连字符开头"
             fi
         done
-    else
-        log "使用随机订阅路径: ${SUB_PATH}"
     fi
 fi
 
@@ -1593,6 +1592,15 @@ sleep 1
 # WEB_ROOT 已在 Clash 配置步骤中确定，确保目录存在
 mkdir -p "$WEB_ROOT"
 
+# 订阅显示名称：自定义则用自定义名+扩展名，否则用默认文件名
+if [ -n "$SUB_DISPLAY_NAME" ]; then
+    CLASH_SUB_FILENAME="${SUB_DISPLAY_NAME}.yaml"
+    VLESS_SUB_FILENAME="${SUB_DISPLAY_NAME}.txt"
+else
+    CLASH_SUB_FILENAME="clash.yaml"
+    VLESS_SUB_FILENAME="nodes.txt"
+fi
+
 # 创建订阅配置（使用 root+try_files 替代 alias，避免 Nginx 版本兼容性问题）
 cat > "$NGINX_CONF" << NGINXEOF
 server {
@@ -1613,7 +1621,7 @@ server {
         try_files /clash.yaml =404;
         default_type text/yaml;
         charset utf-8;
-        add_header Content-Disposition 'attachment; filename=clash.yaml' always;
+        add_header Content-Disposition 'attachment; filename=${CLASH_SUB_FILENAME}' always;
     }
 
     # VLESS 通用订阅端点（base64 编码，兼容旧版 v2rayN/v2rayNG/Shadowrocket）
@@ -1623,7 +1631,7 @@ server {
         try_files /nodes_base64.txt =404;
         default_type text/plain;
         charset utf-8;
-        add_header Content-Disposition 'attachment; filename=nodes.txt' always;
+        add_header Content-Disposition 'attachment; filename=${VLESS_SUB_FILENAME}' always;
     }
 
     # 拒绝所有其他请求
