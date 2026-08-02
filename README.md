@@ -8,7 +8,7 @@
 
 ---
 
-VLESS + Reality + Vision + Fragment 跨境电商网络代理一键部署脚本（v4.5），支持自动 BBR 优化、自动 Swap 配置、Clash 订阅生成、多发行版兼容。Fragment 分片仅在客户端订阅侧生效，服务端不再保留无效 fragment 配置。
+VLESS + Reality + Vision + Fragment 跨境电商网络代理一键部署脚本（v4.5.4），支持自动 BBR 优化、自动 Swap 配置、Clash 订阅生成、多发行版兼容。Fragment 分片仅在客户端订阅侧生效，服务端不再保留无效 fragment 配置。
 
 [![GitHub](https://img.shields.io/badge/GitHub-Evergreen05/xray--proxy--install-blue?logo=github)](https://github.com/Evergreen05/xray-proxy-install)
 
@@ -206,6 +206,8 @@ bash install.sh
 - **白名单模式**：未匹配的流量默认走代理（MATCH=Proxy），确保所有被封锁站点正常访问
 
 > 订阅链接默认通过 HTTP 在 `10707` 端口提供。如需 HTTPS，可在前端部署 Nginx/Caddy 配置有效证书。
+>
+> **规则集下载源可配置**：默认使用 jsdelivr CDN。国内网络拉取规则失败时，可编辑 `install.sh` 头部的 `RULES_CDN_PREFIX` 变量，改为 GitHub 直连（`https://raw.githubusercontent.com/Loyalsoldier/clash-rules@release`）或 ghproxy 镜像后重新部署。
 
 ## DNS 优化
 
@@ -284,7 +286,7 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 - **BBR 拥塞控制** + `fq` 队列调度
 - **TCP 缓冲区**：根据带宽智能计算（公式：带宽 × 12500 字节，100ms RTT），上限 64MB，下限 1MB
 - **连接队列**：随带宽缩放（≤200M: 8192 / ≤1000M: 16384 / >1000M: 32768）
-- **UDP 缓冲区**：与 TCP 缓冲区同步缩放，减少 UDP 中继/QUIC 丢包
+- **UDP 缓冲区**：复用 `net.core.rmem_max` / `wmem_max`（随 TCP 同步放大），减少 UDP 中继/QUIC 丢包
 - **TCP Fast Open**：启用 TFO
 - **MTU 探测**：自动 PMTU 发现
 - **文件描述符**：系统级 1048576，服务级 131072
@@ -308,9 +310,8 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 
 | 包 | 用途 |
 |---|------|
-| curl / wget | 文件下载 |
+| curl | 文件下载、IP 获取 |
 | unzip | Xray 压缩包解压 |
-| socat | 网络工具（端口检测） |
 | jq | JSON 解析（配置管理） |
 | openssl | 证书生成、随机数 |
 | nginx | 订阅文件 HTTP 服务 |
@@ -328,15 +329,41 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 
 ## 版本更新说明
 
-### v4.5
+### v4.5.4
 
-- 移除服务端无效 fragment 配置，Fragment 分片改在 Clash 订阅侧生效；
-- 优化 Web 服务处理：仅停止运行中的 nginx/apache2/httpd/caddy，并在回滚或部署完成后自动恢复非冲突服务；
-- 改进 nginx 默认 vhost 处理：禁用默认站点时采用“符号链接删除 + 真实文件重命名”，避免残留悬空链接导致 `nginx -t` 失败；卸载时自动恢复默认 vhost；
-- XHTTP inbound 补齐 `quic` / `routeOnly` 等 sniffing 配置；
-- `pkill` 使用 `-x` 精确匹配，防止误杀其他进程；
-- 配置语义预检（`xray run -test`）调整至证书生成之后，避免证书尚未生成时预检必然失败；
-- 订阅路径生成改用 `openssl rand -hex 8` 定长输出，避免 `tr | head` 管道被 SIGPIPE 截断导致静默回滚。
+- **修复 `limit_req` 检测失效**：检测用临时配置文件名以 `.` 开头，而 nginx include 走 libc `glob()`（`*` 不匹配 dot 文件），测试文件永不生效导致检测恒为可用；改为非点文件名并在写入前清理历史残留，未编译该模块的自定义构建上不再误报；
+- **修复回滚后原站点 404**：回滚时 `restore_nginx_default_vhosts` 恢复 vhost 文件后 nginx 未重载（进程在跑但站点 404），恢复后补一次 `restart/start` 兜底；
+- **订阅路径持久化**：`SUB_PATH`（随机 16 位 hex）现在写入 `/etc/proxy-manager.env`，nginx 配置丢失后 `proxy-manager info/sub` 仍能恢复完整订阅地址；
+- **`show_info` 订阅信息恢复**：优先使用 env 持久化的 `SUB_PORT`/`SUB_PATH`（缺失时退回 sed 提取），并补充 `/etc/nginx/http.d/proxy-sub.conf` 查找兜底；
+- **修复自定义订阅名 EOF 死循环**：stdin 输入中断（EOF）时不再无限循环提示，自动回退默认文件名；
+- **proxy-manager 补 `disable` 分支**：非 systemd（sysvinit/OpenRC）系统上 `uninstall` 的 `disable` 调用此前静默无效，现可正确移除开机自启；
+- **修复 Swap 已激活误报**：`/swapfile` 已在 `/proc/swaps` 中激活时不再因 `swapon` 报 busy 而误报"无法启用"；
+- **卸载兜底**：`proxy-manager uninstall` 恢复默认 vhost 时显式覆盖 `/etc/nginx/http.d/default.conf`（env 丢失的 Alpine 场景）。
+
+### v4.5.3
+
+- **修复中断无回滚**：部署中途 Ctrl+C / SIGTERM 中断现在会触发完整回滚并释放并发锁（新增 INT/TERM trap + 幂等保护，防止 EXIT/INT 双触发重复回滚）；
+- **修复 `limit_req` 检测失效**：`limit_req` 是 nginx 默认编译模块，`nginx -V` 的 configure 参数不包含模块名，原 grep 检测恒不命中导致限速静默失效；改为写入临时配置 + `nginx -t` 实测检测；
+- **修复 nginx 重启失败误报**：`nginx -t` 通过但服务重启失败时，不再误报"配置错误/端口占用"并删除配置，改为单独提示服务错误并输出日志；
+- **修复 uninstall 误删用户配置**：`/etc/systemd/system/xray.service.d` 改为只删除脚本写入的 `limits.conf` 再 rmdir，不再 `rm -rf` 整个目录（与 nginx 处理一致）；
+- **修复 Swap 失败残留磁盘文件**：`swapon` 启用失败时删除 fallocate 创建的文件，避免容器环境白占磁盘；
+- **移除未使用的依赖**：`socat` / `wget` 脚本内零调用，从自动安装列表移除；
+- **回滚噪音优化**：并发锁冲突等早期失败不再打印空转的"部署失败，开始回滚"提示；
+- **卸载兜底**：`proxy-manager uninstall` 增加 `/etc/nginx/http.d/proxy-sub.conf` 显式清理。
+
+### v4.5.2
+
+- **修复 Alpine 订阅端点失效**：Nginx 配置按发行版写入 `http.d/`（Alpine）或 `conf.d/`（其他发行版），Alpine 上订阅端点不再 404；默认 vhost 禁用/恢复逻辑同步覆盖 `http.d/default.conf`；
+- **修复悬空符号链接清理死代码**：`sites-enabled` 中残留的悬空链接现在会被正确删除，避免 nginx include 报 emerg 导致 `nginx -t` 失败；
+- **移除无效 sysctl**：`net.core.rmem_udp_max` / `net.core.wmem_udp_max` 在 Linux 内核中不存在（会产生开机告警且不生效），UDP 缓冲复用 `net.core.rmem_max` / `wmem_max`；
+- **卸载后重启 Nginx**：`proxy-manager uninstall` 现在会重启 nginx，使默认 vhost 恢复生效、订阅端点移除；
+- **回滚补齐**：`/etc/security/limits.d/99-proxy.conf` 加入回滚栈；
+- **Reality dest 预检超时兜底**：`timeout` 命令缺失时改用后台进程 + 定时 kill，避免对不可达目标无限挂起；
+- **apt 源更新容错**：`apt-get update` / `upgrade` 失败不再直接中止部署，改为告警后继续；
+- **订阅端点限速**：Nginx 启用 `limit_req`（5r/s，burst 10），未编译该模块的自定义 nginx 构建自动跳过；
+- **分流规则源可配置**：新增 `RULES_CDN_PREFIX` 变量，jsdelivr 不可用时可在脚本头部替换为 GitHub 直连或 ghproxy 镜像；
+- **并发保护**：新增锁文件（含陈旧锁清理），防止多个实例同时运行互相干扰；
+- **其他**：IP 检测强制 IPv4（`curl -4`）、`proxy-manager status` 增加订阅端口检查、移除无用 sysctl 备份逻辑、README 版本号统一。
 
 ### v4.5.1
 
@@ -351,6 +378,16 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 - **改进 Xray 版本可观测性**：安装后打印实际版本号；
 - **改进回滚栈 eval 安全约束**：添加注释明确仅限硬编码字符串；
 - **修正文档**：订阅更新间隔描述（滚动 24h 而非固定 06:30）、低内存提示条件（Swap < 2GB 而非 RAM < 1GB）、v2rayN/v2rayNG 订阅格式说明。
+
+### v4.5
+
+- 移除服务端无效 fragment 配置，Fragment 分片改在 Clash 订阅侧生效；
+- 优化 Web 服务处理：仅停止运行中的 nginx/apache2/httpd/caddy，并在回滚或部署完成后自动恢复非冲突服务；
+- 改进 nginx 默认 vhost 处理：禁用默认站点时采用“符号链接删除 + 真实文件重命名”，避免残留悬空链接导致 `nginx -t` 失败；卸载时自动恢复默认 vhost；
+- XHTTP inbound 补齐 `quic` / `routeOnly` 等 sniffing 配置；
+- `pkill` 使用 `-x` 精确匹配，防止误杀其他进程；
+- 配置语义预检（`xray run -test`）调整至证书生成之后，避免证书尚未生成时预检必然失败；
+- 订阅路径生成改用 `openssl rand -hex 8` 定长输出，避免 `tr | head` 管道被 SIGPIPE 截断导致静默回滚。
 
 ## 故障排查
 
@@ -414,7 +451,7 @@ nginx -t                                  # Nginx 配置测试
 | Xray 程序 | `/usr/local/bin/xray` |
 | Clash 订阅文件 | `/usr/share/nginx/html/clash.yaml`（或 `/var/www/html/`） |
 | VLESS 通用订阅 | `/usr/share/nginx/html/nodes.txt`（原始）+ `nodes_base64.txt`（base64） |
-| Nginx 配置 | `/etc/nginx/conf.d/proxy-sub.conf` |
+| Nginx 配置 | `/etc/nginx/conf.d/proxy-sub.conf`（Alpine 为 `/etc/nginx/http.d/proxy-sub.conf`） |
 | 管理脚本 | `/usr/local/bin/proxy-manager` |
 | 管理脚本参数 | `/etc/proxy-manager.env` |
 | 系统优化配置 | `/etc/sysctl.d/99-proxy-optimized.conf` |

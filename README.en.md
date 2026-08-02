@@ -8,7 +8,7 @@
 
 ---
 
-VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e-commerce networks (v4.5). BBR optimization, auto Swap, Clash subscription, multi-distro support. Fragment splitting takes effect on the client subscription side only; the server no longer keeps an invalid fragment config.
+VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e-commerce networks (v4.5.4). BBR optimization, auto Swap, Clash subscription, multi-distro support. Fragment splitting takes effect on the client subscription side only; the server no longer keeps an invalid fragment config.
 
 [![GitHub](https://img.shields.io/badge/GitHub-Evergreen05/xray--proxy--install-blue?logo=github)](https://github.com/Evergreen05/xray-proxy-install)
 
@@ -207,6 +207,8 @@ The generated Clash subscription uses [Loyalsoldier/clash-rules](https://github.
 
 > The subscription URL is served over HTTP on port `10707` by default. For HTTPS, you can put Nginx/Caddy behind with a valid certificate.
 
+> **Configurable rule source**: The default rule source is the jsdelivr CDN. If rule fetching fails on your network, edit the `RULES_CDN_PREFIX` variable at the top of `install.sh` — switch to GitHub direct (`https://raw.githubusercontent.com/Loyalsoldier/clash-rules@release`) or a ghproxy mirror, then redeploy.
+
 ## DNS Optimization
 
 ### Client-side (Clash Meta / mihomo)
@@ -284,7 +286,7 @@ The script intelligently calculates kernel parameters based on user-input bandwi
 - **BBR congestion control** + `fq` qdisc
 - **TCP buffers**: Calculated from bandwidth (formula: bandwidth × 12500 bytes, 100ms RTT), capped at 64MB, floor at 1MB
 - **Connection queues**: Scale with bandwidth (≤200M: 8192 / ≤1000M: 16384 / >1000M: 32768)
-- **UDP buffers**: Scale in sync with TCP buffers to reduce UDP relay/QUIC packet loss
+- **UDP buffers**: Reuse `net.core.rmem_max` / `wmem_max` (scaled in sync with TCP buffers) to reduce UDP relay/QUIC packet loss
 - **TCP Fast Open**: Enabled
 - **MTU probing**: Automatic PMTU discovery
 - **File descriptors**: System-level 1,048,576; service-level 131,072
@@ -308,9 +310,8 @@ Auto-installed packages:
 
 | Package | Purpose |
 |---------|---------|
-| curl / wget | Downloads |
+| curl | Downloads, IP lookup |
 | unzip | Xray archive extraction |
-| socat | Network utilities |
 | jq | JSON parsing |
 | openssl | Certificate generation, random bytes |
 | nginx | Subscription file HTTP server |
@@ -328,15 +329,41 @@ Auto-installed packages:
 
 ## Version History
 
-### v4.5
+### v4.5.4
 
-- Removed invalid server-side fragment config; Fragment splitting now takes effect on the Clash subscription side only.
-- Improved web-service handling: only stops running nginx/apache2/httpd/caddy processes and automatically restores non-conflicting services after rollback or deployment.
-- Improved nginx default-vhost handling: disabling the default site now uses "symlink removal + real-file rename" to avoid dangling symlinks that break `nginx -t`; default vhosts are restored on uninstall.
-- XHTTP inbound now includes `quic` / `routeOnly` sniffing settings.
-- `pkill` uses `-x` exact matching to avoid accidental kills.
-- Config semantic pre-check (`xray run -test`) moved after certificate generation to avoid the inevitable failure caused by missing certs.
-- Subscription path generation switched to `openssl rand -hex 8` fixed-length output to avoid the `tr | head` SIGPIPE issue that silently triggered rollback.
+- **Fixed `limit_req` detection again**: the detection temp file started with a `.`, and nginx include wildcards use libc `glob()` (`*` never matches dotfiles), so the test config was never included and the check always reported the module as available. The file no longer starts with a dot, and stale leftovers are cleaned before each write so a crashed run can't leave a file that breaks `nginx -t` forever on builds without the module.
+- **Fixed original site 404 after rollback**: the `restore_nginx_default_vhosts` rollback restored vhost files but never reloaded nginx (process running, site still 404). It now does a `restart`/`start` fallback after restoring.
+- **Subscription path persisted**: `SUB_PATH` (random 16-char hex) is now written to `/etc/proxy-manager.env`, so `proxy-manager info`/`sub` can still produce the full subscription URL even if the nginx config is lost.
+- **`show_info` subscription recovery**: uses the persisted env `SUB_PORT`/`SUB_PATH` first (falls back to sed extraction), and adds `/etc/nginx/http.d/proxy-sub.conf` to the config lookup.
+- **Fixed infinite loop on EOF**: interrupted stdin (EOF) in the custom subscription-name prompt no longer loops forever; it falls back to the default filename.
+- **`proxy-manager` gained `disable`**: on non-systemd (sysvinit/OpenRC) systems the `uninstall` `disable` call was silently a no-op; it now properly removes boot auto-start.
+- **Fixed false Swap warning**: an already-active `/swapfile` (listed in `/proc/swaps`) no longer reports "cannot enable" because `swapon` returns busy.
+- **Uninstall fallback**: restoring default vhosts now explicitly covers `/etc/nginx/http.d/default.conf` (Alpine when env is lost).
+
+### v4.5.3
+
+- **Fixed interrupted deploys leaving no rollback**: Ctrl+C / SIGTERM mid-deploy now triggers a full rollback and releases the concurrency lock (added INT/TERM traps + an idempotence guard so the rollback stack never runs twice when both INT and EXIT traps fire).
+- **Fixed `limit_req` detection**: `limit_req` is a default-compiled nginx module, so `nginx -V` configure args never list it and the old grep check silently disabled rate limiting on every standard build. Detection now writes a temp config and verifies with `nginx -t`.
+- **Fixed misleading nginx restart failure**: When `nginx -t` passes but the service fails to restart, the script no longer misreports "config error / port in use" and deletes the config — it now reports the service error separately with journal logs.
+- **Fixed uninstall deleting user drop-ins**: `/etc/systemd/system/xray.service.d` now only removes the `limits.conf` written by the script (rmdir if empty), no more `rm -rf` of the whole directory (consistent with the nginx handling).
+- **Fixed Swap failure leaving disk garbage**: `swapon` failure now removes the fallocate-created file, avoiding wasted disk in container environments.
+- **Removed unused dependencies**: `socat` / `wget` are never called by the script and are removed from the auto-install list.
+- **Rollback noise reduction**: Early failures (e.g. concurrency lock conflict) no longer print the pointless "deployment failed, rolling back" message with an empty stack.
+- **Uninstall fallback**: `proxy-manager uninstall` now explicitly removes `/etc/nginx/http.d/proxy-sub.conf`.
+
+### v4.5.2
+
+- **Fixed Alpine subscription endpoint failure**: Nginx config is now written to `http.d/` (Alpine) or `conf.d/` (other distros) based on the distro layout — the subscription endpoint no longer 404s on Alpine; the default-vhost disable/restore logic now also covers `http.d/default.conf`.
+- **Fixed dangling-symlink cleanup dead code**: Residual dangling symlinks in `sites-enabled` are now removed correctly, preventing nginx include emerg errors that broke `nginx -t`.
+- **Removed invalid sysctls**: `net.core.rmem_udp_max` / `net.core.wmem_udp_max` do not exist in the Linux kernel (they produced boot warnings and had no effect); UDP buffers now reuse `net.core.rmem_max` / `wmem_max`.
+- **Nginx restart after uninstall**: `proxy-manager uninstall` now restarts nginx so default vhosts take effect again and the subscription endpoint is removed.
+- **Rollback completeness**: `/etc/security/limits.d/99-proxy.conf` is now added to the rollback stack.
+- **Reality dest preflight timeout fallback**: When the `timeout` command is missing, a background process + timed kill is used instead, avoiding infinite hangs on unreachable targets.
+- **apt tolerance**: `apt-get update` / `upgrade` failures no longer abort deployment — they warn and continue.
+- **Subscription rate limiting**: Nginx `limit_req` enabled (5r/s, burst 10); automatically skipped only on custom nginx builds lacking the limit_req module.
+- **Configurable rule source**: New `RULES_CDN_PREFIX` variable — if jsdelivr is unreliable, replace it with GitHub direct or a ghproxy mirror at the top of the script before deploying.
+- **Concurrency guard**: A lock file (with stale-lock cleanup) prevents multiple instances from interfering with each other.
+- **Other**: IPv4-forced IP detection (`curl -4`), `proxy-manager status` now also checks the subscription port, removed unused sysctl backup logic, README version consistency.
 
 ### v4.5.1
 
@@ -351,6 +378,16 @@ Auto-installed packages:
 - **Improved Xray version observability**: Prints the actual installed version number after install.
 - **Improved rollback-stack eval safety constraint**: Added comment clarifying that only hardcoded strings are allowed.
 - **Doc fixes**: Subscription update interval (rolling 24h, not fixed 06:30), low-memory prompt condition (Swap < 2GB, not RAM < 1GB), v2rayN/v2rayNG subscription format notes.
+
+### v4.5
+
+- Removed invalid server-side fragment config; Fragment splitting now takes effect on the Clash subscription side only.
+- Improved web-service handling: only stops running nginx/apache2/httpd/caddy processes and automatically restores non-conflicting services after rollback or deployment.
+- Improved nginx default-vhost handling: disabling the default site now uses "symlink removal + real-file rename" to avoid dangling symlinks that break `nginx -t`; default vhosts are restored on uninstall.
+- XHTTP inbound now includes `quic` / `routeOnly` sniffing settings.
+- `pkill` uses `-x` exact matching to avoid accidental kills.
+- Config semantic pre-check (`xray run -test`) moved after certificate generation to avoid the inevitable failure caused by missing certs.
+- Subscription path generation switched to `openssl rand -hex 8` fixed-length output to avoid the `tr | head` SIGPIPE issue that silently triggered rollback.
 
 ## Troubleshooting
 
@@ -414,7 +451,7 @@ nginx -t                                  # Nginx config test
 | Xray binary | `/usr/local/bin/xray` |
 | Clash subscription | `/usr/share/nginx/html/clash.yaml` (or `/var/www/html/`) |
 | VLESS universal subscription | `/usr/share/nginx/html/nodes.txt` (raw) + `nodes_base64.txt` (base64) |
-| Nginx config | `/etc/nginx/conf.d/proxy-sub.conf` |
+| Nginx config | `/etc/nginx/conf.d/proxy-sub.conf` (Alpine: `/etc/nginx/http.d/proxy-sub.conf`) |
 | Manager CLI | `/usr/local/bin/proxy-manager` |
 | Manager CLI env | `/etc/proxy-manager.env` |
 | Sysctl config | `/etc/sysctl.d/99-proxy-optimized.conf` |

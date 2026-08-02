@@ -4,8 +4,17 @@ set -e -o pipefail
 export LC_ALL=C
 
 # ============================================
-# Xray Proxy Install Script v4.5.1
+# Xray Proxy Install Script v4.5.4
 # Protocol: VLESS + Reality + Vision + Fragment（Fragment 在客户端订阅侧生效）
+# v4.5.4: 修复 limit_req 检测失效（测试文件名带点，*.conf 通配永不匹配，检测恒为可用）、
+#       回滚后 nginx 不重载导致原站点 404（恢复 vhost 后重启）、SUB_PATH 持久化到 env、
+#       show_info 订阅信息 env 优先+http.d 兜底、自定义订阅名 EOF 死循环、
+#       proxy-manager 补 disable 分支、swap 已激活误报 busy、uninstall 恢复 http.d 默认 vhost
+# v4.5.3: 修复 Ctrl+C/SIGTERM 中断无回滚（INT/TERM trap + 幂等保护）、limit_req 检测失效（改 nginx -t 实测）、
+#       nginx 重启失败误报配置错误、uninstall 误删用户 drop-in、Swap 失败残留磁盘文件；
+#       移除未使用的 socat/wget 依赖、回滚栈为空时静默退出、uninstall 增加 http.d 兜底清理
+# v4.5.2: 修复 Alpine 订阅端点失效（http.d）、悬空链接清理死代码、无效 sysctl、卸载不重启 nginx；
+#       加入 Reality dest 预检超时兜底、apt 容错、订阅端点限速、分流规则源可配置、并发锁等
 # v4.5.1: 新增 VLESS 通用订阅（nodes.txt + -vless 端点）；修复 curl 静默成功/swap fstab/uninstall 路径等 bug
 # v4.5: 移除服务端无效 fragment 配置；仅停止运行中的 Web 服务且回滚/完成后自动恢复；
 #       nginx 默认 vhost 卸载时可恢复；XHTTP sniffing 补齐 quic/routeOnly；pkill 锚定防误杀；
@@ -58,10 +67,17 @@ step() {
 # ============================================
 ROLLBACK_LOG=()
 DEPLOY_SUCCESS=0
+ROLLED_BACK=0
 
 rollback() {
-    if [ "$DEPLOY_SUCCESS" -eq 1 ]; then
+    # 幂等保护：INT/TERM trap 与 EXIT trap 可能先后触发，防止回滚栈执行两遍
+    if [ "$DEPLOY_SUCCESS" -eq 1 ] || [ "$ROLLED_BACK" -eq 1 ]; then
         return
+    fi
+    ROLLED_BACK=1
+    # 回滚栈为空（并发锁冲突、参数校验等早期失败）时静默退出，不打印空转提示
+    if [ ${#ROLLBACK_LOG[@]} -eq 0 ]; then
+        exit 1
     fi
     echo ""
     echo -e "${RED}[ERROR]${NC} 部署失败，开始回滚..."
@@ -74,11 +90,32 @@ rollback() {
     exit 1
 }
 
-trap rollback EXIT
+release_lock() {
+    if [ -n "${LOCK_FILE:-}" ] && [ -f "$LOCK_FILE" ] && [ "$(cat "$LOCK_FILE" 2>/dev/null)" = "$$" ]; then
+        rm -f "$LOCK_FILE"
+    fi
+}
+
+# EXIT/INT/TERM 统一走 release_lock + rollback：
+# 部署中途 Ctrl+C / kill 时同样回滚并释放锁，避免留下"服务已停、依赖装了一半"的脏状态
+trap 'release_lock; rollback' EXIT INT TERM
 
 add_rollback() {
     ROLLBACK_LOG=("$1" "${ROLLBACK_LOG[@]}")
 }
+
+# 并发保护：防止多个实例同时运行互相干扰
+# noclobber 使 > 具备 O_EXCL 原子语义；残留的陈旧锁（PID 已不存在）会被清理
+LOCK_FILE="/tmp/xray-proxy-install.lock"
+if [ -f "$LOCK_FILE" ]; then
+    OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
+    if [ -n "$OLD_PID" ] && ! kill -0 "$OLD_PID" 2>/dev/null; then
+        rm -f "$LOCK_FILE"
+    fi
+fi
+if ! ( set -o noclobber; echo "$$" > "$LOCK_FILE" ) 2>/dev/null; then
+    error "检测到 install.sh 已在运行（锁文件 ${LOCK_FILE}），本次部署中止"
+fi
 
 # ============================================
 # 部署参数（单一事实源：端口/域名/节点名全部由此派生）
@@ -176,9 +213,9 @@ system_update() {
     case "$PKG_MANAGER" in
         apt)
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq
+            apt-get update -qq || warn "apt-get update 失败（可能是源或网络问题），继续部署..."
             if [ "$1" = "upgrade" ]; then
-                apt-get upgrade -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+                apt-get upgrade -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || warn "apt-get upgrade 失败（继续部署，后续依赖安装失败会触发回滚）..."
             fi
             ;;
         dnf)
@@ -300,7 +337,7 @@ step "获取服务器公网 IP"
 # IP 获取（多源容错，不使用 grep -P）
 SERVER_IP=""
 for src in ifconfig.me ipinfo.io/ip ip.sb icanhazip.com; do
-    RESP=$(curl -s --connect-timeout 5 --max-time 10 "https://${src}" 2>/dev/null || true)
+    RESP=$(curl -s4 --connect-timeout 5 --max-time 10 "https://${src}" 2>/dev/null || true)
     SERVER_IP=$(extract_ip "$RESP")
     [ -n "$SERVER_IP" ] && break
 done
@@ -371,7 +408,10 @@ else
             RECREATE_SWAP=${RECREATE_SWAP:-n}
             if [[ "$RECREATE_SWAP" != "y" && "$RECREATE_SWAP" != "Y" ]]; then
                 log "保留现有 Swap"
-                if swapon /swapfile 2>/dev/null; then
+                if grep -q '/swapfile' /proc/swaps 2>/dev/null; then
+                    # 已激活时 swapon 会报 busy，直接视为可用，避免误报
+                    SWAP_OK=1
+                elif swapon /swapfile 2>/dev/null; then
                     SWAP_OK=1
                 else
                     warn "现有 Swap 无法启用（容器环境可能不支持）"
@@ -389,6 +429,8 @@ else
                 else
                     SWAP_OK=0
                     warn "Swap 启用失败（容器环境可能不支持），将继续部署"
+                    # fallocate 已真实占用磁盘，启用失败时删除文件避免白占空间
+                    rm -f /swapfile
                 fi
                 # 仅在 swap 实际启用成功时才写入 fstab，避免每次开机产生挂载失败日志
                 if [ "$SWAP_OK" -eq 1 ] && ! grep -q '/swapfile' /etc/fstab; then
@@ -406,6 +448,8 @@ else
             else
                 SWAP_OK=0
                 warn "Swap 启用失败（容器环境可能不支持），将继续部署"
+                # fallocate 已真实占用磁盘，启用失败时删除文件避免白占空间
+                rm -f /swapfile
             fi
             # 仅在 swap 实际启用成功时才写入 fstab，避免每次开机产生挂载失败日志
             if [ "$SWAP_OK" -eq 1 ] && ! grep -q '/swapfile' /etc/fstab; then
@@ -470,10 +514,13 @@ rm -f /etc/nginx/sites-enabled/proxy-sub-secure 2>/dev/null || true
 rm -f /etc/nginx/sites-available/proxy-sub-secure 2>/dev/null || true
 rm -f /etc/nginx/sites-enabled/proxy-sub 2>/dev/null || true
 rm -f /etc/nginx/conf.d/proxy-sub.conf 2>/dev/null || true
+rm -f /etc/nginx/http.d/proxy-sub.conf 2>/dev/null || true
 if [ -d /etc/nginx/sites-enabled ]; then
     for link in /etc/nginx/sites-enabled/*; do
-        [ -e "$link" ] || continue
-        [ -L "$link" ] && [ ! -e "$link" ] && rm -f "$link"
+        # 悬空符号链接（-L 为真且 -e 为假）必须先删除，否则 nginx include 报 emerg 导致 nginx -t 失败
+        if [ -L "$link" ] && [ ! -e "$link" ]; then
+            rm -f "$link"
+        fi
     done
 fi
 
@@ -533,11 +580,11 @@ fi
 
 log "安装依赖..."
 case "$PKG_MANAGER" in
-    apt)    ESSENTIALS=(curl wget unzip socat jq openssl nginx); OPTIONAL=(haveged) ;;
+    apt)    ESSENTIALS=(curl unzip jq openssl nginx); OPTIONAL=(haveged) ;;
     dnf|yum)
         [[ "$DISTRO_ID" =~ ^(centos|rhel|almalinux|rocky|anolis|alinux|openEuler|euleros|virtuozzo|ol)$ ]] && $PKG_MANAGER install -y -q epel-release 2>/dev/null || true
-        ESSENTIALS=(curl wget unzip socat jq openssl nginx); OPTIONAL=(haveged) ;;
-    *)      ESSENTIALS=(curl wget unzip socat jq openssl nginx); OPTIONAL=(haveged) ;;
+        ESSENTIALS=(curl unzip jq openssl nginx); OPTIONAL=(haveged) ;;
+    *)      ESSENTIALS=(curl unzip jq openssl nginx); OPTIONAL=(haveged) ;;
 esac
 install_packages "${ESSENTIALS[@]}"
 # 可选包：安装失败不中断部署
@@ -595,9 +642,7 @@ else
     log "带宽: ${BANDWIDTH_MBPS} Mbps → TCP 缓冲区: ${TCP_BUF_MB} MB, 连接队列: ${QUEUE_SIZE}"
 fi
 
-# 备份原始配置（每次部署生成时间戳备份，仅保留最近 3 份，避免无限累积）
-cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%s) 2>/dev/null || true
-( ls -1t /etc/sysctl.conf.bak.* 2>/dev/null || true ) | tail -n +4 | xargs -r rm -f 2>/dev/null || true
+# 本脚本只新增 /etc/sysctl.d/99-proxy-optimized.conf，不改动 /etc/sysctl.conf，无需备份
 add_rollback "rm -f /etc/sysctl.d/99-proxy-optimized.conf; sysctl --system >/dev/null 2>&1 || true"
 
 cat > /etc/sysctl.d/99-proxy-optimized.conf << 'SYSCTL'
@@ -673,9 +718,7 @@ net.ipv4.conf.default.accept_source_route=0
 net.ipv4.icmp_echo_ignore_broadcasts=1
 net.ipv4.icmp_ignore_bogus_error_responses=1
 
-# --- UDP 缓冲区（代理 UDP 中继/QUIC/语音视频时减少丢包）---
-net.core.rmem_udp_max=__TCP_BUF_MAX__
-net.core.wmem_udp_max=__TCP_BUF_MAX__
+# --- UDP 缓冲区（复用 net.core.rmem_max/wmem_max，代理 UDP 中继/QUIC 时减少丢包）---
 
 # --- Swap 优化 ---
 vm.swappiness=10
@@ -710,6 +753,7 @@ root hard nofile 131072
 root soft nproc 32768
 root hard nproc 32768
 LIMITS
+add_rollback "rm -f /etc/security/limits.d/99-proxy.conf"
 
 log "网络优化完成"
 
@@ -870,7 +914,7 @@ if [ "$AUTO_YES" -eq 0 ]; then
     if [[ "$CUSTOM_NAME_CHOICE" == "y" || "$CUSTOM_NAME_CHOICE" == "Y" ]]; then
         while true; do
             echo -e "${YELLOW}请输入订阅显示名称（纯英文/数字/连字符/下划线，2-32 字符，无需扩展名）:${NC}"
-            read -r -p "订阅名称: " SUB_NAME_INPUT || SUB_NAME_INPUT=""
+            read -r -p "订阅名称: " SUB_NAME_INPUT || { warn "输入中断，使用默认订阅文件名"; break; }
             # 校验：只允许 a-zA-Z0-9_-，长度 2-32
             if [ -n "$SUB_NAME_INPUT" ] && \
                echo "$SUB_NAME_INPUT" | grep -qE '^[a-zA-Z0-9_][a-zA-Z0-9_-]{1,31}$'; then
@@ -890,13 +934,23 @@ fi
 # 仍失败则恢复默认并告警（可能是服务器出网受限，客户端侧未必不可用），不阻断部署
 # ============================================
 check_reality_dest() {
-    local domain="$1" out
-    local timeout_cmd=""
+    local domain="$1" out tmp pid killer
     if command -v timeout &>/dev/null; then
-        timeout_cmd="timeout 12"
+        # 单次连接同时验证 TLS1.3 + h2 + X25519，减少对目标服务器的请求
+        out=$(timeout 12 openssl s_client -connect "${domain}:443" -servername "${domain}" -tls1_3 -alpn h2 -curves X25519 </dev/null 2>/dev/null || true)
+    else
+        # 无 timeout 命令（极端精简系统）时用后台进程 + 定时 kill 兜底，避免对不可达目标无限挂起
+        tmp="/tmp/reality-check.$$"
+        rm -f "$tmp"
+        { openssl s_client -connect "${domain}:443" -servername "${domain}" -tls1_3 -alpn h2 -curves X25519 </dev/null 2>/dev/null >"$tmp"; } &
+        pid=$!
+        ( sleep 12; kill "$pid" 2>/dev/null || true ) &
+        killer=$!
+        wait "$pid" 2>/dev/null || true
+        kill "$killer" 2>/dev/null || true
+        out=$(cat "$tmp" 2>/dev/null || true)
+        rm -f "$tmp"
     fi
-    # 单次连接同时验证 TLS1.3 + h2 + X25519，减少对目标服务器的请求
-    out=$($timeout_cmd openssl s_client -connect "${domain}:443" -servername "${domain}" -tls1_3 -alpn h2 -curves X25519 </dev/null 2>/dev/null || true)
     echo "$out" | grep -q "ALPN protocol: h2" && \
     echo "$out" | grep -q "TLSv1.3" && \
     # OpenSSL 1.1.1 输出 "Server Temp Key: X25519"，3.x 输出 "Server Temp Key: ECDH, X25519, ..."
@@ -1248,6 +1302,12 @@ else
 fi
 mkdir -p "$WEB_ROOT"
 
+# 确定 Nginx 配置目录（Alpine 的 nginx 只 include /etc/nginx/http.d/，其余主流发行版为 conf.d/）
+NGINX_CONF_DIR="/etc/nginx/conf.d"
+if [ -d /etc/nginx/http.d ]; then
+    NGINX_CONF_DIR="/etc/nginx/http.d"
+fi
+
 # ============================================
 # 循环生成节点：REALITY_CDNS 中每个伪装 CDN x 3 种网络类型（当前默认 1 个 CDN = 3 个节点）
 # 节点命名: <类型>-<CDN标签>（如 Reality-Apple-SWDIST），同类型节点归入对应分组
@@ -1317,6 +1377,12 @@ PROXY
     GROUP_XHTTP+="      - \"XHTTP-${CDN_TAG}\""$'\n'
 done
 CLASH_PROXIES=$(printf "%s\n" "${PROXY_BLOCKS[@]}")
+
+# 分流规则集下载源（默认 jsdelivr CDN）
+# 国内网络拉取规则失败时，可在部署前修改此变量为其他源，例如：
+#   RULES_CDN_PREFIX="https://raw.githubusercontent.com/Loyalsoldier/clash-rules@release"
+#   RULES_CDN_PREFIX="https://mirror.ghproxy.com/https://raw.githubusercontent.com/Loyalsoldier/clash-rules@release"
+RULES_CDN_PREFIX="${RULES_CDN_PREFIX:-https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release}"
 
 cat > "$WEB_ROOT/clash.yaml" << CLASHEOF
 mixed-port: 7890
@@ -1405,77 +1471,77 @@ rule-providers:
   reject:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/reject.txt"
+    url: "${RULES_CDN_PREFIX}/reject.txt"
     path: ./ruleset/reject.yaml
     interval: 86400
 
   icloud:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/icloud.txt"
+    url: "${RULES_CDN_PREFIX}/icloud.txt"
     path: ./ruleset/icloud.yaml
     interval: 86400
 
   apple:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/apple.txt"
+    url: "${RULES_CDN_PREFIX}/apple.txt"
     path: ./ruleset/apple.yaml
     interval: 86400
 
   google:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/google.txt"
+    url: "${RULES_CDN_PREFIX}/google.txt"
     path: ./ruleset/google.yaml
     interval: 86400
 
   proxy:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/proxy.txt"
+    url: "${RULES_CDN_PREFIX}/proxy.txt"
     path: ./ruleset/proxy.yaml
     interval: 86400
 
   direct:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/direct.txt"
+    url: "${RULES_CDN_PREFIX}/direct.txt"
     path: ./ruleset/direct.yaml
     interval: 86400
 
   private:
     type: http
     behavior: domain
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/private.txt"
+    url: "${RULES_CDN_PREFIX}/private.txt"
     path: ./ruleset/private.yaml
     interval: 86400
 
   telegramcidr:
     type: http
     behavior: ipcidr
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/telegramcidr.txt"
+    url: "${RULES_CDN_PREFIX}/telegramcidr.txt"
     path: ./ruleset/telegramcidr.yaml
     interval: 86400
 
   cncidr:
     type: http
     behavior: ipcidr
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/cncidr.txt"
+    url: "${RULES_CDN_PREFIX}/cncidr.txt"
     path: ./ruleset/cncidr.yaml
     interval: 86400
 
   lancidr:
     type: http
     behavior: ipcidr
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/lancidr.txt"
+    url: "${RULES_CDN_PREFIX}/lancidr.txt"
     path: ./ruleset/lancidr.yaml
     interval: 86400
 
   applications:
     type: http
     behavior: classical
-    url: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/applications.txt"
+    url: "${RULES_CDN_PREFIX}/applications.txt"
     path: ./ruleset/applications.yaml
     interval: 86400
 
@@ -1542,7 +1608,7 @@ log "VLESS 通用订阅已生成: ${WEB_ROOT}/nodes.txt"
 # ============================================
 step "配置 Nginx 订阅端点"
 
-NGINX_CONF="/etc/nginx/conf.d/proxy-sub.conf"
+NGINX_CONF="$NGINX_CONF_DIR/proxy-sub.conf"
 
 # 防御性创建目录：部分发行版（如极简 Alpine）的 nginx 包不一定预创建 conf.d
 mkdir -p "$(dirname "$NGINX_CONF")"
@@ -1552,9 +1618,17 @@ rm -f /etc/nginx/sites-enabled/proxy-sub 2>/dev/null || true
 rm -f /etc/nginx/sites-enabled/proxy-sub-secure 2>/dev/null || true
 rm -f /etc/nginx/sites-available/proxy-sub 2>/dev/null || true
 rm -f /etc/nginx/sites-available/proxy-sub-secure 2>/dev/null || true
+rm -f /etc/nginx/http.d/proxy-sub.conf 2>/dev/null || true
+# 需要禁用的发行版默认 vhost（覆盖 conf.d / http.d / sites-enabled 布局）
+DEFAULT_VHOSTS=(
+    "/etc/nginx/conf.d/default.conf"
+    "/etc/nginx/sites-available/default"
+    "/etc/nginx/sites-enabled/default"
+)
+[ "$NGINX_CONF_DIR" = "/etc/nginx/http.d" ] && DEFAULT_VHOSTS=("/etc/nginx/http.d/default.conf" "${DEFAULT_VHOSTS[@]}")
 # 恢复默认 vhost（供回滚栈 eval 调用；proxy-manager 卸载段有同等实现）
 restore_nginx_default_vhosts() {
-    for f in /etc/nginx/conf.d/default.conf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default; do
+    for f in "${DEFAULT_VHOSTS[@]}"; do
         if [ -e "${f}.disabled-by-proxy" ] || [ -L "${f}.disabled-by-proxy" ]; then
             mv -f "${f}.disabled-by-proxy" "$f" 2>/dev/null || true
         fi
@@ -1575,7 +1649,7 @@ if [ -L /etc/nginx/sites-enabled/default.disabled-by-proxy ] && [ ! -e /etc/ngin
     rm -f /etc/nginx/sites-enabled/default.disabled-by-proxy
     NGINX_DEFAULT_SYMLINK=1
 fi
-for f in /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default; do
+for f in "${DEFAULT_VHOSTS[@]}"; do
     if [ -L "$f" ]; then
         rm -f "$f"
         if [ "$f" = "/etc/nginx/sites-enabled/default" ]; then
@@ -1585,7 +1659,7 @@ for f in /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default /etc/ng
         mv -f "$f" "${f}.disabled-by-proxy" 2>/dev/null || true
     fi
 done
-add_rollback "restore_nginx_default_vhosts"
+add_rollback "restore_nginx_default_vhosts; service_manage restart nginx 2>/dev/null || service_manage start nginx 2>/dev/null || true"
 service_manage stop nginx 2>/dev/null || true
 sleep 1
 
@@ -1602,8 +1676,32 @@ else
     VLESS_SUB_FILENAME="nodes.txt"
 fi
 
+# 订阅端点限速（limit_req 是 nginx 默认编译模块，`nginx -V` 的 configure 参数里不会列出，
+# 无法用 grep 检测；改写入临时配置后用 nginx -t 实测，避免在未编译该模块的自定义构建上
+# 写配置导致 nginx -t 失败）
+# 注意：测试文件名不能以 . 开头——nginx include 走 libc glob()，`*` 不匹配 dot 文件，
+# 点开头文件永不生效，检测会恒为可用（自定义精简构建上误报导致部署失败）
+NGINX_HAS_LIMIT_REQ=0
+LIMIT_REQ_TEST="$NGINX_CONF_DIR/limit_req_test_$$.conf"
+# 清理历史失败运行遗留的测试文件（非点文件名会被 *.conf 通配 include，
+# 残留文件在未编译 limit_req 模块的 nginx 上会使后续 nginx -t 永久失败）
+rm -f "$NGINX_CONF_DIR"/limit_req_test_*.conf
+echo 'limit_req_zone $binary_remote_addr zone=_proxy_limit_req_test:1m rate=1r/s;' > "$LIMIT_REQ_TEST"
+if nginx -t >/dev/null 2>&1; then
+    NGINX_HAS_LIMIT_REQ=1
+fi
+rm -f "$LIMIT_REQ_TEST"
+LIMIT_REQ_ZONE=""
+LIMIT_REQ_RULE=""
+if [ "$NGINX_HAS_LIMIT_REQ" -eq 1 ]; then
+    LIMIT_REQ_ZONE="limit_req_zone \$binary_remote_addr zone=proxy_sub_zone:10m rate=5r/s;"
+    LIMIT_REQ_RULE="limit_req zone=proxy_sub_zone burst=10 nodelay;"
+fi
+
 # 创建订阅配置（使用 root+try_files 替代 alias，避免 Nginx 版本兼容性问题）
 cat > "$NGINX_CONF" << NGINXEOF
+${LIMIT_REQ_ZONE}
+
 server {
     listen ${SUB_PORT};
     server_name _;
@@ -1618,6 +1716,7 @@ server {
 
     # 只允许特定路径访问订阅
     location = /${SUB_PATH} {
+        ${LIMIT_REQ_RULE}
         root ${WEB_ROOT};
         try_files /clash.yaml =404;
         default_type text/yaml;
@@ -1628,6 +1727,7 @@ server {
     # VLESS 通用订阅端点（base64 编码，兼容旧版 v2rayN/v2rayNG/Shadowrocket）
     # 路径与 Clash 订阅共享相同前缀，加 -vless 后缀区分
     location = /${SUB_PATH}-vless {
+        ${LIMIT_REQ_RULE}
         root ${WEB_ROOT};
         try_files /nodes_base64.txt =404;
         default_type text/plain;
@@ -1651,12 +1751,17 @@ fi
 
 add_rollback "rm -f '$NGINX_CONF'; service_manage restart nginx 2>/dev/null || true"
 
-nginx -t 2>&1 && service_manage restart nginx || {
+if ! nginx -t 2>&1; then
     warn "Nginx 配置测试失败"
     rm -f "$NGINX_CONF"
     service_manage restart nginx 2>/dev/null || true
     error "Nginx 配置错误，请检查端口 ${SUB_PORT} 是否被占用"
-}
+fi
+if ! service_manage restart nginx 2>/dev/null; then
+    warn "Nginx 服务重启失败（配置已写入 ${NGINX_CONF}）"
+    journalctl -u nginx --no-pager -n 20 2>/dev/null || true
+    error "Nginx 服务重启失败，请检查上方日志"
+fi
 
 # ============================================
 # 12. 配置服务限制并启动
@@ -1732,12 +1837,15 @@ REALITY_PORTS="${REALITY_PORTS[*]}"
 CDN_LABELS="${CDN_LABELS}"
 NODE_TYPES="Reality TLS XHTTP"
 WEB_ROOT="${WEB_ROOT}"
+NGINX_CONF_DIR="${NGINX_CONF_DIR}"
+SUB_PORT="${SUB_PORT}"
+SUB_PATH="${SUB_PATH}"
 NGINX_DEFAULT_SYMLINK="${NGINX_DEFAULT_SYMLINK:-0}"
 ENVEOF
 
 cat > /usr/local/bin/proxy-manager << 'MGRSCRIPT'
 #!/bin/bash
-# Xray Proxy Manager v4.5.1
+# Xray Proxy Manager v4.5.4
 # https://github.com/Evergreen05/xray-proxy-install
 
 RED='\033[0;31m'
@@ -1756,6 +1864,10 @@ PROXY_PORTS=${PROXY_PORTS:-"443 8443 8880"}
 REALITY_PORTS=${REALITY_PORTS:-"443"}
 CDN_LABELS=${CDN_LABELS:-"Microsoft-CDN"}
 NODE_TYPES=${NODE_TYPES:-"Reality TLS XHTTP"}
+WEB_ROOT=${WEB_ROOT:-/usr/share/nginx/html}
+NGINX_CONF_DIR=${NGINX_CONF_DIR:-/etc/nginx/conf.d}
+SUB_PORT=${SUB_PORT:-10707}
+SUB_PATH=${SUB_PATH:-}
 NGINX_DEFAULT_SYMLINK=${NGINX_DEFAULT_SYMLINK:-0}
 
 service_manage() {
@@ -1766,6 +1878,7 @@ service_manage() {
     elif command -v service &>/dev/null; then
         case "$action" in
             enable)  update-rc.d "$service" defaults 2>/dev/null || chkconfig "$service" on 2>/dev/null || true ;;
+            disable) update-rc.d "$service" remove 2>/dev/null || chkconfig "$service" off 2>/dev/null || true ;;
             start)   service "$service" start ;;
             stop)    service "$service" stop ;;
             restart) service "$service" restart ;;
@@ -1774,6 +1887,7 @@ service_manage() {
     elif command -v rc-service &>/dev/null; then
         case "$action" in
             enable)  rc-update add "$service" default 2>/dev/null || true ;;
+            disable) rc-update del "$service" default 2>/dev/null || true ;;
             start)   rc-service "$service" start ;;
             stop)    rc-service "$service" stop ;;
             restart) rc-service "$service" restart ;;
@@ -1793,17 +1907,17 @@ is_service_active() {
 }
 
 show_info() {
-    SERVER_IP=$(curl -s --connect-timeout 5 --max-time 10 ifconfig.me 2>/dev/null || curl -s --connect-timeout 5 --max-time 10 ip.sb 2>/dev/null || echo "unknown")
+    SERVER_IP=$(curl -s4 --connect-timeout 5 --max-time 10 ifconfig.me 2>/dev/null || curl -s4 --connect-timeout 5 --max-time 10 ip.sb 2>/dev/null || echo "unknown")
     UUID=$(cat /usr/local/etc/xray/config.json 2>/dev/null | jq -r '.inbounds[0].settings.clients[0].id' 2>/dev/null || echo "unknown")
 
     NGINX_CONF=""
-    for conf in /etc/nginx/conf.d/proxy-sub.conf /etc/nginx/sites-available/proxy-sub-secure; do
+    for conf in "$NGINX_CONF_DIR/proxy-sub.conf" /etc/nginx/http.d/proxy-sub.conf /etc/nginx/sites-available/proxy-sub-secure; do
         [ -f "$conf" ] && NGINX_CONF="$conf" && break
     done
 
-    # 使用 sed 提取（兼容无 grep -P 的系统）
-    SUB_PORT=$(sed -n 's/.*listen \([0-9]*\).*/\1/p' "$NGINX_CONF" 2>/dev/null | head -1)
-    SUB_PATH=$(sed -n 's/.*location = \/\([a-zA-Z0-9_-]*\).*/\1/p' "$NGINX_CONF" 2>/dev/null | head -1)
+    # env 值优先（部署时持久化，最可靠）；nginx 配置缺失/旧版 env 无 SUB_PATH 时退回 sed 提取（兼容无 grep -P 的系统）
+    SUB_PORT=${SUB_PORT:-$(sed -n 's/.*listen \([0-9]*\).*/\1/p' "$NGINX_CONF" 2>/dev/null | head -1)}
+    SUB_PATH=${SUB_PATH:-$(sed -n 's/.*location = \/\([a-zA-Z0-9_-]*\).*/\1/p' "$NGINX_CONF" 2>/dev/null | head -1)}
 
     PRIVATE_KEY=$(cat /usr/local/etc/xray/config.json 2>/dev/null | jq -r '.inbounds[0].streamSettings.realitySettings.privateKey' 2>/dev/null)
     if [ -n "$PRIVATE_KEY" ] && [ "$PRIVATE_KEY" != "null" ]; then
@@ -1872,14 +1986,14 @@ port_check() {
 # 提取订阅地址（供 sub 命令使用）
 get_sub_url() {
     local conf=""
-    for c in /etc/nginx/conf.d/proxy-sub.conf /etc/nginx/sites-available/proxy-sub-secure; do
+    for c in "$NGINX_CONF_DIR/proxy-sub.conf" /etc/nginx/sites-available/proxy-sub-secure; do
         [ -f "$c" ] && conf="$c" && break
     done
     [ -z "$conf" ] && return 1
     local port path ip
     port=$(sed -n 's/.*listen \([0-9]*\).*/\1/p' "$conf" 2>/dev/null | head -1)
     path=$(sed -n 's/.*location = \/\([a-zA-Z0-9_-]*\).*/\1/p' "$conf" 2>/dev/null | head -1)
-    ip=$(curl -s --connect-timeout 5 --max-time 10 ifconfig.me 2>/dev/null || curl -s --connect-timeout 5 --max-time 10 ip.sb 2>/dev/null || echo "<服务器IP>")
+    ip=$(curl -s4 --connect-timeout 5 --max-time 10 ifconfig.me 2>/dev/null || curl -s4 --connect-timeout 5 --max-time 10 ip.sb 2>/dev/null || echo "<服务器IP>")
     if [ -n "$port" ] && [ -n "$path" ]; then
         echo -e "${GREEN}Clash 订阅 (Clash Meta / v2rayN 6.x+):${NC}"
         echo "  http://${ip}:${port}/${path}"
@@ -1920,6 +2034,7 @@ case "$1" in
         for port in $PROXY_PORTS; do
             if port_check "$port"; then echo -e "  端口 ${port}: ${GREEN}正常${NC}"; else echo -e "  端口 ${port}: ${RED}未监听${NC}"; fi
         done
+        if port_check "$SUB_PORT"; then echo -e "  端口 ${SUB_PORT} (订阅): ${GREEN}正常${NC}"; else echo -e "  端口 ${SUB_PORT} (订阅): ${RED}未监听${NC}"; fi
         ;;
     restart)
         echo -e "${YELLOW}重启服务...${NC}"
@@ -1978,11 +2093,14 @@ case "$1" in
         service_manage disable xray 2>/dev/null || true
         rm -f /usr/local/etc/xray/config.json
         rm -f /etc/xray/server.crt /etc/xray/server.key
-        rm -f /etc/nginx/conf.d/proxy-sub.conf
+        rm -f "$NGINX_CONF_DIR/proxy-sub.conf"
+        rm -f /etc/nginx/conf.d/proxy-sub.conf 2>/dev/null || true
+        rm -f /etc/nginx/http.d/proxy-sub.conf 2>/dev/null || true
         rm -f /etc/nginx/sites-available/proxy-sub-secure
         rm -f /etc/nginx/sites-enabled/proxy-sub-secure
         # 恢复安装时被重命名禁用的发行版默认 vhost（如有）
-        for f in /etc/nginx/conf.d/default.conf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default; do
+        # http.d 显式列出：env 丢失时 NGINX_CONF_DIR 回退 conf.d，Alpine 上不会被覆盖
+        for f in "$NGINX_CONF_DIR/default.conf" /etc/nginx/http.d/default.conf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default; do
             if [ -e "${f}.disabled-by-proxy" ] || [ -L "${f}.disabled-by-proxy" ]; then
                 mv -f "${f}.disabled-by-proxy" "$f" 2>/dev/null || true
             fi
@@ -2005,7 +2123,9 @@ case "$1" in
         rm -f /usr/local/bin/proxy-manager
         rm -f /etc/sysctl.d/99-proxy-optimized.conf
         rm -f /etc/security/limits.d/99-proxy.conf
-        rm -rf /etc/systemd/system/xray.service.d
+        # 只删除本脚本写入的 drop-in，目录内若有用户自定义配置则保留（与 nginx 处理一致）
+        rm -f /etc/systemd/system/xray.service.d/limits.conf
+        rmdir /etc/systemd/system/xray.service.d 2>/dev/null || true
         # 只删除本脚本写入的 drop-in，目录内若有用户自定义配置则保留
         rm -f /etc/systemd/system/nginx.service.d/limits.conf
         rmdir /etc/systemd/system/nginx.service.d 2>/dev/null || true
@@ -2024,10 +2144,12 @@ case "$1" in
         fi
         rm -f "$XRAY_UNINSTALL_TMP"
         sysctl --system >/dev/null 2>&1 || true
+        # 恢复配置后重启 nginx，使默认 vhost 恢复生效、订阅端点移除
+        service_manage restart nginx 2>/dev/null || true
         echo -e "${GREEN}卸载完成${NC}"
         ;;
     *)
-        echo -e "${BLUE}Xray Proxy Manager v4.5.1${NC}"
+        echo -e "${BLUE}Xray Proxy Manager v4.5.4${NC}"
         echo -e "GitHub: https://github.com/Evergreen05/xray-proxy-install"
         echo ""
         echo "用法: proxy-manager <命令>"
