@@ -8,7 +8,7 @@
 
 ---
 
-VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e-commerce networks (v4.5.4). BBR optimization, auto Swap, Clash subscription, multi-distro support. Fragment splitting takes effect on the client subscription side only; the server no longer keeps an invalid fragment config.
+VLESS + Reality + Vision + Fragment proxy one-click installer for cross-border e-commerce networks (v4.5.5). BBR optimization, auto Swap, Clash subscription, multi-distro support. Fragment splitting takes effect on the client subscription side only; the server no longer keeps an invalid fragment config.
 
 [![GitHub](https://img.shields.io/badge/GitHub-Evergreen05/xray--proxy--install-blue?logo=github)](https://github.com/Evergreen05/xray-proxy-install)
 
@@ -328,6 +328,10 @@ Auto-installed packages:
 - **Config pre-check**: jq JSON validation + `xray run -test` semantic check; aborts and rolls back on failure; Reality dest is additionally preflighted for TLS1.3 + h2 in Step 7 with automatic fallback
 
 ## Version History
+
+### v4.5.5
+
+- **Clash rules strictly aligned with the official ruleset**: rule-providers now include the `gfw` and `tld-not-cn` sets, matching all 13 providers from the Loyalsoldier/clash-rules official README; `icloud` / `apple` domains are restored to the official default `DIRECT` (previously routed through the proxy); rule entries and order stay identical to the official whitelist mode (the official `PROXY` policy maps to the `Proxy` group defined in this config).
 
 ### v4.5.4
 

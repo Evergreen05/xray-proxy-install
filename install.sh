@@ -4,8 +4,10 @@ set -e -o pipefail
 export LC_ALL=C
 
 # ============================================
-# Xray Proxy Install Script v4.5.4
+# Xray Proxy Install Script v4.5.5
 # Protocol: VLESS + Reality + Vision + Fragment（Fragment 在客户端订阅侧生效）
+# v4.5.5: Clash 分流严格对齐 Loyalsoldier/clash-rules 官方白名单模式：补齐 gfw / tld-not-cn
+#       两个 rule-providers；icloud / apple 域名由走代理改回官方默认 DIRECT
 # v4.5.4: 修复 limit_req 检测失效（测试文件名带点，*.conf 通配永不匹配，检测恒为可用）、
 #       回滚后 nginx 不重载导致原站点 404（恢复 vhost 后重启）、SUB_PATH 持久化到 env、
 #       show_info 订阅信息 env 优先+http.d 兜底、自定义订阅名 EOF 死循环、
@@ -1465,7 +1467,8 @@ ${GROUP_XHTTP}
 
 # ============================================
 # Rule Providers (Loyalsoldier/clash-rules)
-# 规则集自动更新，无需手动维护
+# 与官方 README 完全一致的 13 个规则集（含 gfw / tld-not-cn），自动更新无需手动维护
+# URL 前缀可通过 RULES_CDN_PREFIX 覆盖（见上方变量定义），文件结构不变
 # ============================================
 rule-providers:
   reject:
@@ -1517,6 +1520,20 @@ rule-providers:
     path: ./ruleset/private.yaml
     interval: 86400
 
+  gfw:
+    type: http
+    behavior: domain
+    url: "${RULES_CDN_PREFIX}/gfw.txt"
+    path: ./ruleset/gfw.yaml
+    interval: 86400
+
+  tld-not-cn:
+    type: http
+    behavior: domain
+    url: "${RULES_CDN_PREFIX}/tld-not-cn.txt"
+    path: ./ruleset/tld-not-cn.yaml
+    interval: 86400
+
   telegramcidr:
     type: http
     behavior: ipcidr
@@ -1547,6 +1564,8 @@ rule-providers:
 
 # ============================================
 # Rules (白名单模式，未命中规则走代理)
+# 规则条目与顺序严格对齐 Loyalsoldier 官方白名单模式；
+# 官方示例中的 PROXY 对应本配置的 Proxy 分组（上方 proxy-groups 已定义）
 # ============================================
 rules:
   - RULE-SET,applications,DIRECT
@@ -1554,8 +1573,8 @@ rules:
   - DOMAIN,yacd.haishan.me,DIRECT
   - RULE-SET,private,DIRECT
   - RULE-SET,reject,REJECT
-  - RULE-SET,icloud,Proxy
-  - RULE-SET,apple,Proxy
+  - RULE-SET,icloud,DIRECT
+  - RULE-SET,apple,DIRECT
   - RULE-SET,google,Proxy
   - RULE-SET,proxy,Proxy
   - RULE-SET,direct,DIRECT
@@ -1845,7 +1864,7 @@ ENVEOF
 
 cat > /usr/local/bin/proxy-manager << 'MGRSCRIPT'
 #!/bin/bash
-# Xray Proxy Manager v4.5.4
+# Xray Proxy Manager v4.5.5
 # https://github.com/Evergreen05/xray-proxy-install
 
 RED='\033[0;31m'
@@ -2149,7 +2168,7 @@ case "$1" in
         echo -e "${GREEN}卸载完成${NC}"
         ;;
     *)
-        echo -e "${BLUE}Xray Proxy Manager v4.5.4${NC}"
+        echo -e "${BLUE}Xray Proxy Manager v4.5.5${NC}"
         echo -e "GitHub: https://github.com/Evergreen05/xray-proxy-install"
         echo ""
         echo "用法: proxy-manager <命令>"

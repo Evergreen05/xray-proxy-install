@@ -8,7 +8,7 @@
 
 ---
 
-VLESS + Reality + Vision + Fragment 跨境电商网络代理一键部署脚本（v4.5.4），支持自动 BBR 优化、自动 Swap 配置、Clash 订阅生成、多发行版兼容。Fragment 分片仅在客户端订阅侧生效，服务端不再保留无效 fragment 配置。
+VLESS + Reality + Vision + Fragment 跨境电商网络代理一键部署脚本（v4.5.5），支持自动 BBR 优化、自动 Swap 配置、Clash 订阅生成、多发行版兼容。Fragment 分片仅在客户端订阅侧生效，服务端不再保留无效 fragment 配置。
 
 [![GitHub](https://img.shields.io/badge/GitHub-Evergreen05/xray--proxy--install-blue?logo=github)](https://github.com/Evergreen05/xray-proxy-install)
 
@@ -328,6 +328,10 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 - **配置预检**：jq 验证 JSON 合法性 + `xray run -test` 语义校验，不合格中止部署并回滚；Reality dest 在 Step 7 额外进行 TLS1.3 + h2 预检并自动替补
 
 ## 版本更新说明
+
+### v4.5.5
+
+- **Clash 分流严格对齐官方规则**：rule-providers 补齐 `gfw` / `tld-not-cn` 两个规则集，与 Loyalsoldier/clash-rules 官方 README 的 13 个 provider 完全一致；`icloud` / `apple` 域名由走代理改回官方默认的 `DIRECT`；rules 条目与顺序保持与官方白名单模式逐条一致（官方示例中的 `PROXY` 策略对应本配置的 `Proxy` 分组）。
 
 ### v4.5.4
 
