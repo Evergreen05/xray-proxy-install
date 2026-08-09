@@ -65,7 +65,7 @@ bash install.sh
 ## Features
 
 - **Multi-protocol nodes**: Reality+Vision (primary/anti-detection), VLESS+TLS (backup), XHTTP+Reality (CDN-compatible); Fragment splitting is applied in the generated Clash subscription
-- **Single-domain, single-port Reality**: Default fronting target is `cdn-dynmedia-1.microsoft.com:443`. The server only exposes one real Microsoft dynamic media CDN certificate on 443, avoiding the strong active-probing signature of multi-port/multi-site setups
+- **Single-domain, single-port Reality**: Default fronting target is `updates.cdn-apple.com:443`. The server only exposes one real Apple software-update CDN certificate on 443, avoiding the strong active-probing signature of multi-port/multi-site setups
 - **Dest preflight at deploy time**: Step 7 uses `openssl s_client -tls1_3 -alpn h2` to verify the target. Failing domains are dropped; if all fail, the script auto-falls back through the backup pool. If the pool also fails, it warns and continues without blocking deployment
 - **DNS optimization**: Client-side fake-ip + fallback-filter anti-pollution; server-side Xray built-in DoH resolution
 - **Auto BBR optimization**: Intelligently calculates TCP buffer and connection queue parameters based on user-input bandwidth (Mbps) using a 100ms RTT formula
@@ -137,23 +137,23 @@ The script runs through **14 steps** (plus a pre-check and final output):
 
 ## Node Configuration
 
-This release uses a **single-domain, single-port Reality** design: the default fronting target `cdn-dynmedia-1.microsoft.com:443` maps to one Reality inbound, plus TLS (8443) and XHTTP (8880) backup inbounds — **3 nodes** in total. Node names follow `<Type>-<CDN-Label>` (e.g. `Reality-Microsoft-CDN`).
+This release uses a **single-domain, single-port Reality** design: the default fronting target `updates.cdn-apple.com:443` maps to one Reality inbound, plus TLS (8443) and XHTTP (8880) backup inbounds — **3 nodes** in total. Node names follow `<Type>-<CDN-Label>` (e.g. `Reality-Apple-Update`).
 
-- If the primary target fails preflight and a fallback domain is adopted, all three nodes share that fallback domain (e.g. `Reality-Apple-Update`, `TLS-Apple-Update`, `XHTTP-Apple-Update`) on different ports;
+- If the primary target fails preflight and a fallback domain is adopted, all three nodes share that fallback domain (e.g. `Reality-Microsoft-CDN`, `TLS-Microsoft-CDN`, `XHTTP-Microsoft-CDN`) on different ports;
 - To scale, append `domain|port|label` entries to the `REALITY_CDNS` array at the top of the script; the Reality/TLS/XHTTP groups will cascade automatically. Different Reality inbounds must use different ports and cannot all bind to 443.
 
 | Camouflage CDN | Node Label | Reality Port | dest |
 |----------------|-----------|--------------|------|
-| cdn-dynmedia-1.microsoft.com | Microsoft-CDN | 443 | cdn-dynmedia-1.microsoft.com:443 |
+| updates.cdn-apple.com | Apple-Update | 443 | updates.cdn-apple.com:443 |
 
 | Type | Port | Protocol | Transport | Encryption | Purpose |
 |------|------|----------|-----------|------------|---------|
 | Reality | 443 | VLESS | TCP + Vision | Reality | Primary, anti-detection; subscription includes Fragment |
-| TLS | 8443 | VLESS | TCP + Vision | TLS (self-signed) | Backup, SNI = Microsoft-CDN domain |
-| XHTTP | 8880 | VLESS | XHTTP | Reality | CDN compatible, Reality security layer, SNI = Microsoft-CDN domain |
+| TLS | 8443 | VLESS | TCP + Vision | TLS (self-signed) | Backup, SNI = Apple-Update domain |
+| XHTTP | 8880 | VLESS | XHTTP | Reality | CDN compatible, Reality security layer, SNI = Apple-Update domain |
 
 - **Fragment**: TLS Client Hello fragmentation (100-200 bytes, 10-50ms interval) for enhanced anti-detection; applied by the Clash Meta client from the subscription side, Xray server no longer configures fragment
-- **Reality**: Single-domain, single-port — a probe only sees the real Microsoft dynamic media CDN certificate on 443. Default dest supports TLS1.3 + h2 with a clean certificate chain (Microsoft enterprise CA)
+- **Reality**: Single-domain, single-port — a probe only sees the real Apple software-update CDN certificate on 443. Default dest supports TLS1.3 + h2 with a clean certificate chain (Apple enterprise CA)
 - **Vision**: XTLS Vision flow control for high performance
 - **XHTTP**: HTTP/2-based XHTTP transport + Reality security layer (no self-signed cert needed), supports CDN relay
 - **Proxy group**: Proxy → Reality / TLS / XHTTP sub-groups, manual `select` only — no url-test or fallback
@@ -168,14 +168,14 @@ The previous release camouflaged 5 different sites (Apple, Microsoft, Bing) on 5
 - Multi-port + multi-domain combinations are easily fingerprinted;
 - Bing and Apple download CDNs are overused in tutorials and already noisy.
 
-The new release converges to one domain on one port: the default dest `cdn-dynmedia-1.microsoft.com:443` matches a real-world Microsoft dynamic media CDN server — a probe only sees a clean enterprise CDN certificate.
+The new release converges to one domain on one port: the default dest `updates.cdn-apple.com:443` matches a real-world Apple software-update CDN server — a probe only sees a clean enterprise CDN certificate.
 
 ### Dest preflight & fallback pool
 
 During Step 7, `check_reality_dest` verifies each target with `openssl s_client -tls1_3 -alpn h2`:
 
-1. If the primary target `cdn-dynmedia-1.microsoft.com` passes, it is used directly;
-2. If it fails, the script tries the fallback pool in order: `updates.cdn-apple.com`, `iosapps.itunes.apple.com`, `download-porter.hoyoverse.com`, `osxapps.itunes.apple.com`, `music.apple.com`, `tv.apple.com`, `www.mi.com`, `buylite.music.apple.com`, `www.lamer.com.hk`; **only the first passing domain is adopted**, multiple fallback domains are not deployed simultaneously;
+1. If the primary target `updates.cdn-apple.com` passes, it is used directly;
+2. If it fails, the script tries the fallback pool in order: `cdn-dynmedia-1.microsoft.com`, `iosapps.itunes.apple.com`, `download-porter.hoyoverse.com`, `osxapps.itunes.apple.com`, `music.apple.com`, `tv.apple.com`, `www.mi.com`, `buylite.music.apple.com`, `www.lamer.com.hk`; **only the first passing domain is adopted**, multiple fallback domains are not deployed simultaneously;
 3. If the fallback pool also fails, the script warns but **continues deployment without blocking** (the server’s outbound may be restricted while the client side might still work), and defaults to the first fallback domain to generate the config.
 
 This mechanism lets the script self-heal when the default domain becomes unavailable, without requiring manual code edits.
@@ -250,7 +250,7 @@ Ensure these ports are open in your cloud security group/firewall before deploym
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 443 | TCP | Reality primary node - Microsoft-CDN (cdn-dynmedia-1.microsoft.com) |
+| 443 | TCP | Reality primary node - Apple-Update (updates.cdn-apple.com) |
 | 8443 | TCP | VLESS TLS backup node (self-signed certificate) |
 | 8880 | TCP | VLESS XHTTP CDN-compatible node (Reality security layer) |
 | 10707 | TCP | Clash subscription HTTP endpoint (configurable) |

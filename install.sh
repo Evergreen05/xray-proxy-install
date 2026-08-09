@@ -131,12 +131,12 @@ fi
 # 如需多域名可按格式继续添加行（端口递增），但强烈建议保持单域名
 # ============================================
 REALITY_CDNS=(
-    "cdn-dynmedia-1.microsoft.com|443|Microsoft-CDN"
+    "updates.cdn-apple.com|443|Apple-Update"
 )
 
 # dest 预检失败时的备用候选（域名|标签），按序尝试
 DEST_FALLBACKS=(
-    "updates.cdn-apple.com|Apple-Update"
+    "cdn-dynmedia-1.microsoft.com|Microsoft-CDN"
     "iosapps.itunes.apple.com|Apple-iTunes"
     "download-porter.hoyoverse.com|Hoyoverse"
     "osxapps.itunes.apple.com|Apple-macOS"
@@ -1881,7 +1881,7 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 [ -f /etc/proxy-manager.env ] && . /etc/proxy-manager.env
 PROXY_PORTS=${PROXY_PORTS:-"443 8443 8880"}
 REALITY_PORTS=${REALITY_PORTS:-"443"}
-CDN_LABELS=${CDN_LABELS:-"Microsoft-CDN"}
+CDN_LABELS=${CDN_LABELS:-"Apple-Update"}
 NODE_TYPES=${NODE_TYPES:-"Reality TLS XHTTP"}
 WEB_ROOT=${WEB_ROOT:-/usr/share/nginx/html}
 NGINX_CONF_DIR=${NGINX_CONF_DIR:-/etc/nginx/conf.d}

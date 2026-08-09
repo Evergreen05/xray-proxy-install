@@ -65,7 +65,7 @@ bash install.sh
 ## 功能特性
 
 - **多协议节点**：Reality+Vision（主力/防探测）、VLESS+TLS（备用）、XHTTP+Reality（CDN兼容）；Fragment 分片在客户端订阅配置中生效
-- **单域名单端口 Reality**：默认伪装目标为 `cdn-dynmedia-1.microsoft.com:443`，一机仅暴露一个真实存在的微软动态媒体 CDN 证书，避免多端口/多公司站点被主动探测识别
+- **单域名单端口 Reality**：默认伪装目标为 `updates.cdn-apple.com:443`，一机仅暴露一个真实存在的苹果系统更新 CDN 证书，避免多端口/多公司站点被主动探测识别
 - **dest 部署时自动预检**：Step 7 用 `openssl s_client -tls1_3 -alpn h2` 实测目标，不满足则剔除；全部失败时从备用池自动替补；仍失败则告警继续部署不阻断
 - **DNS 优化**：Clash 端 fake-ip + fallback-filter 防污染；服务端 Xray 内置 DoH 解析
 - **自动 BBR 优化**：根据用户输入的带宽（Mbps）智能计算 TCP 缓冲区和连接队列参数（100ms RTT 公式）
@@ -137,23 +137,23 @@ bash install.sh
 
 ## 节点配置
 
-当前采用**单域名单端口 Reality**设计：默认伪装目标 `cdn-dynmedia-1.microsoft.com:443` 对应一个 Reality 入站，再搭配 TLS（8443）与 XHTTP（8880）两个备用入站，共 **3 个节点**。节点命名格式为 `<网络类型>-<CDN标签>`（如 `Reality-Microsoft-CDN`）。
+当前采用**单域名单端口 Reality**设计：默认伪装目标 `updates.cdn-apple.com:443` 对应一个 Reality 入站，再搭配 TLS（8443）与 XHTTP（8880）两个备用入站，共 **3 个节点**。节点命名格式为 `<网络类型>-<CDN标签>`（如 `Reality-Apple-Update`）。
 
-- 若主目标预检失败并从备用池自动替补，则三个节点会共享同一个 fallback 域名（如 `Reality-Apple-Update`、`TLS-Apple-Update`、`XHTTP-Apple-Update`），仅端口不同；
+- 若主目标预检失败并从备用池自动替补，则三个节点会共享同一个 fallback 域名（如 `Reality-Microsoft-CDN`、`TLS-Microsoft-CDN`、`XHTTP-Microsoft-CDN`），仅端口不同；
 - 如需扩展，往脚本头部 `REALITY_CDNS` 数组添加 `域名|端口|标签` 即可自动级联生成 Reality/TLS/XHTTP 三组节点。不同 Reality 入站必须使用不同端口，不可同时占用 443。
 
 | 伪装 CDN | 节点标签 | Reality 端口 | dest |
 |---------|---------|-------------|------|
-| cdn-dynmedia-1.microsoft.com | Microsoft-CDN | 443 | cdn-dynmedia-1.microsoft.com:443 |
+| updates.cdn-apple.com | Apple-Update | 443 | updates.cdn-apple.com:443 |
 
 | 网络类型 | 端口 | 协议 | 传输 | 加密 | 用途 |
 |---------|------|------|------|------|------|
 | Reality | 443 | VLESS | TCP + Vision | Reality | 主力推荐，防探测；订阅配置含 Fragment 分片 |
-| TLS | 8443 | VLESS | TCP + Vision | TLS（自签） | 备用节点，SNI 为 Microsoft-CDN 域名 |
-| XHTTP | 8880 | VLESS | XHTTP | Reality | CDN 兼容，Reality 安全层，SNI 为 Microsoft-CDN 域名 |
+| TLS | 8443 | VLESS | TCP + Vision | TLS（自签） | 备用节点，SNI 为 Apple-Update 域名 |
+| XHTTP | 8880 | VLESS | XHTTP | Reality | CDN 兼容，Reality 安全层，SNI 为 Apple-Update 域名 |
 
 - **Fragment**：TLS Client Hello 分片（100-200字节，间隔10-50ms），增强抗检测能力；由 Clash Meta 客户端在订阅侧生效，服务端 Xray 不再配置 fragment
-- **Reality**：单域名单端口，探测者只能看到 443 上 Microsoft 动态媒体 CDN 的真实证书；默认 dest 支持 TLS1.3 + h2，证书链干净（Microsoft 企业 CA）
+- **Reality**：单域名单端口，探测者只能看到 443 上苹果系统更新 CDN 的真实证书；默认 dest 支持 TLS1.3 + h2，证书链干净（Apple 企业 CA）
 - **Vision**：XTLS Vision 流控，提供高性能代理
 - **XHTTP**：基于 HTTP/2 的 XHTTP 传输 + Reality 安全层（无需自签证书），支持 CDN 中转
 - **订阅分组**：Proxy → Reality / TLS / XHTTP 三个子分组，仅手动 `select`，不含 url-test 与 fallback
@@ -168,14 +168,14 @@ bash install.sh
 - 多端口 + 多域名组合容易被特征库收录；
 - Bing、Apple 下载 CDN 等目标已被大量教程用滥，指纹嘈杂。
 
-新版收敛为单域名单端口：默认 dest `cdn-dynmedia-1.microsoft.com:443`，对应真实世界中存在的微软动态媒体 CDN 服务器形态，探测者只能看到一个干净的企业级 CDN 证书。
+新版收敛为单域名单端口：默认 dest `updates.cdn-apple.com:443`，对应真实世界中存在的苹果系统更新 CDN 服务器形态，探测者只能看到一个干净的企业级 CDN 证书。
 
 ### dest 预检与备用池
 
 部署 Step 7 会调用 `check_reality_dest`，用 `openssl s_client -tls1_3 -alpn h2` 实测每个目标：
 
-1. 主目标 `cdn-dynmedia-1.microsoft.com` 通过预检则直接使用；
-2. 主目标失败时，按序尝试备用池：`updates.cdn-apple.com` → `iosapps.itunes.apple.com` → `download-porter.hoyoverse.com` → `osxapps.itunes.apple.com` → `music.apple.com` → `tv.apple.com` → `www.mi.com` → `buylite.music.apple.com` → `www.lamer.com.hk`；**只会采用第一个通过预检的域名**，不会同时部署多个；
+1. 主目标 `updates.cdn-apple.com` 通过预检则直接使用；
+2. 主目标失败时，按序尝试备用池：`cdn-dynmedia-1.microsoft.com` → `iosapps.itunes.apple.com` → `download-porter.hoyoverse.com` → `osxapps.itunes.apple.com` → `music.apple.com` → `tv.apple.com` → `www.mi.com` → `buylite.music.apple.com` → `www.lamer.com.hk`；**只会采用第一个通过预检的域名**，不会同时部署多个；
 3. 备用池全部失败时，脚本会告警但**继续部署不阻断**（可能是服务器出网受限，客户端侧未必不可用），并默认使用备用池第一个域名继续生成配置。
 
 这套机制让脚本在默认域名失效时仍能自愈，无需手动修改代码。
@@ -250,7 +250,7 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 
 | 端口 | 协议 | 用途 |
 |-----|------|------|
-| 443 | TCP | Reality 主力节点 - Microsoft-CDN（cdn-dynmedia-1.microsoft.com） |
+| 443 | TCP | Reality 主力节点 - Apple-Update（updates.cdn-apple.com） |
 | 8443 | TCP | VLESS TLS 备用节点（自签证书） |
 | 8880 | TCP | VLESS XHTTP CDN 兼容节点（Reality 安全层） |
 | 10707 | TCP | Clash 订阅 HTTP 端点（可修改） |
