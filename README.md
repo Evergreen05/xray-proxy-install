@@ -8,9 +8,59 @@
 
 ---
 
-VLESS + Reality + Vision + Fragment 跨境电商网络代理一键部署脚本（v4.5.5），支持自动 BBR 优化、自动 Swap 配置、Clash 订阅生成、多发行版兼容。Fragment 分片仅在客户端订阅侧生效，服务端不再保留无效 fragment 配置。
+VLESS + Reality + Vision + Fragment 跨境电商网络代理一键部署脚本（v4.5），支持自动 BBR 优化、自动 Swap 配置、Clash 订阅生成、多发行版兼容。Fragment 分片仅在客户端订阅侧生效，服务端不再保留无效 fragment 配置。
 
 [![GitHub](https://img.shields.io/badge/GitHub-Evergreen05/xray--proxy--install-blue?logo=github)](https://github.com/Evergreen05/xray-proxy-install)
+
+## 功能特性
+
+- **多协议节点**：Reality+Vision（主力/防探测）、VLESS+TLS（备用）、XHTTP+Reality（CDN兼容）；Fragment 分片在客户端订阅配置中生效
+- **单域名单端口 Reality**：默认伪装目标为 `cdn-dynmedia-1.microsoft.com:443`，一机仅暴露一个真实存在的微软动态媒体 CDN 证书，避免多端口/多公司站点被主动探测识别
+- **dest 部署时自动预检**：Step 7 用 `openssl s_client -tls1_3 -alpn h2` 实测目标，不满足则剔除；全部失败时从备用池自动替补；仍失败则告警继续部署不阻断
+- **DNS 优化**：Clash 端 fake-ip + fallback-filter 防污染；服务端 Xray 内置 DoH 解析
+- **自动 BBR 优化**：根据用户输入的带宽（Mbps）智能计算 TCP 缓冲区和连接队列参数（100ms RTT 公式）
+- **Swap 配置**：交互模式下询问是否配置及大小（MB），推荐值为物理内存 2 倍；无人值守模式跳过（容器环境创建失败不中断部署）
+- **Clash 订阅**：自动生成 Clash Meta 格式订阅文件，通过 Nginx 提供 HTTP 下载端点
+- **VLESS 通用订阅**：同时生成 `vless://` 链接的 base64 订阅（`nodes.txt` / `<sub-path>-vless` 端点），兼容 v2rayN/v2rayNG/Shadowrocket 旧版等不支持 Clash Meta YAML 的客户端
+- **智能分流规则**：基于 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules)（⭐ ~27.6k），每日自动更新，白名单模式精确国内外分流
+- **自动证书**：ECC P-256 自签名证书（SAN 覆盖全部伪装域名），安全权限设置
+- **版本固定**：Xray-core 固定版本安装（v26.3.27），失败自动回退最新版
+- **配置预检**：部署时 jq 验证 JSON + `xray run -test` 语义校验，不合格不启动
+- **时钟检测**：部署前检查 NTP 同步状态（Reality 握手对时间敏感）
+- **启动自愈**：Xray 启动失败时自动修复证书权限并重试
+- **跨平台兼容**：支持 apt/dnf/yum/pacman/zypper/apk 六大包管理器（Alpine 需预先安装 bash，且未经充分测试）
+- **跨服务管理**：支持 systemd/sysvinit/OpenRC 三种服务管理器
+- **防火墙自动放行**：自动配置 ufw/firewalld/iptables（含规则持久化）
+- **SELinux 兼容**：CentOS/RHEL/Anolis 自动设置 httpd_sys_content_t 上下文
+- **失败自动回滚**：部署过程中任意步骤失败自动回滚所有变更（覆盖安装时还原旧配置）
+- **管理脚本**：部署后提供 `proxy-manager` 命令管理服务（含配置测试、订阅地址查询）
+- **密钥兜底**：多种 X25519 密钥提取与校验模式（含 JSON、正则、OpenSSL 本地生成等 5 种兜底），兼容不同 Xray 版本输出
+
+## 支持的操作系统
+
+| 发行版 | 版本要求 | 包管理器 | 服务管理器 | 备注 |
+|-------|---------|---------|-----------|------|
+| Ubuntu | 16.04+ | apt | systemd | |
+| Debian | 9+ | apt | systemd | |
+| CentOS | 7+ | yum/dnf | systemd | |
+| RHEL | 7+ | yum/dnf | systemd | |
+| Rocky Linux | 8+ | dnf | systemd | |
+| AlmaLinux | 8+ | dnf | systemd | |
+| Anolis OS（龙蜥） | 8+ | dnf | systemd | |
+| Fedora | 29+ | dnf | systemd | |
+| openSUSE | Leap 15+ / Tumbleweed | zypper | systemd | |
+| Arch Linux / Manjaro | 滚动版 | pacman | systemd | |
+| Alpine Linux | 3.12+ | apk | OpenRC | 需预装 bash，OpenRC 路径未经充分测试 |
+| Amazon Linux | 2/2023 | yum/dnf | systemd | |
+| openEuler（欧拉） | 20.03+ | dnf | systemd | |
+
+> 容器环境（OpenVZ/LXC）下 Swap 创建失败不会中断部署；内核需 4.9+ 以支持 BBR。
+
+## 重要提示
+
+- **订阅默认走 HTTP**：部署完成后生成的订阅链接是 `http://IP:10707/随机路径`。HTTP 明文传输可能被中间人截获，建议仅在可信网络使用，或通过 SFTP/SCP 直接下载 `/usr/share/nginx/html/clash.yaml` 到本地。如需 HTTPS 必须自备域名和证书。最安全的做法是不通过公网订阅链接，直接用 SFTP/SCP 把配置文件拉到本地。
+- **TLS 节点需跳过证书校验**：8443 端口使用自签名证书，客户端必须开启 `skip-cert-verify`。
+- **Reality 是主力节点**：443 端口 Reality 节点无需额外设置，推荐日常使用；TLS 与 XHTTP 作为备用/兼容性节点。
 
 ## 快速开始
 
@@ -62,56 +112,6 @@ bash install.sh
 
 > **提示**：部署完成后，执行 `proxy-manager info` 查看订阅地址和节点参数。
 
-## 功能特性
-
-- **多协议节点**：Reality+Vision（主力/防探测）、VLESS+TLS（备用）、XHTTP+Reality（CDN兼容）；Fragment 分片在客户端订阅配置中生效
-- **单域名单端口 Reality**：默认伪装目标为 `updates.cdn-apple.com:443`，一机仅暴露一个真实存在的苹果系统更新 CDN 证书，避免多端口/多公司站点被主动探测识别
-- **dest 部署时自动预检**：Step 7 用 `openssl s_client -tls1_3 -alpn h2` 实测目标，不满足则剔除；全部失败时从备用池自动替补；仍失败则告警继续部署不阻断
-- **DNS 优化**：Clash 端 fake-ip + fallback-filter 防污染；服务端 Xray 内置 DoH 解析
-- **自动 BBR 优化**：根据用户输入的带宽（Mbps）智能计算 TCP 缓冲区和连接队列参数（100ms RTT 公式）
-- **Swap 配置**：交互模式下询问是否配置及大小（MB），推荐值为物理内存 2 倍；无人值守模式跳过（容器环境创建失败不中断部署）
-- **Clash 订阅**：自动生成 Clash Meta 格式订阅文件，通过 Nginx 提供 HTTP 下载端点
-- **VLESS 通用订阅**：同时生成 `vless://` 链接的 base64 订阅（`nodes.txt` / `<sub-path>-vless` 端点），兼容 v2rayN/v2rayNG/Shadowrocket 旧版等不支持 Clash Meta YAML 的客户端
-- **智能分流规则**：基于 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules)（⭐ ~27.6k），每日自动更新，白名单模式精确国内外分流
-- **自动证书**：ECC P-256 自签名证书（SAN 覆盖全部伪装域名），安全权限设置
-- **版本固定**：Xray-core 固定版本安装（v26.3.27），失败自动回退最新版
-- **配置预检**：部署时 jq 验证 JSON + `xray run -test` 语义校验，不合格不启动
-- **时钟检测**：部署前检查 NTP 同步状态（Reality 握手对时间敏感）
-- **启动自愈**：Xray 启动失败时自动修复证书权限并重试
-- **跨平台兼容**：支持 apt/dnf/yum/pacman/zypper/apk 六大包管理器（Alpine 需预先安装 bash，且未经充分测试）
-- **跨服务管理**：支持 systemd/sysvinit/OpenRC 三种服务管理器
-- **防火墙自动放行**：自动配置 ufw/firewalld/iptables（含规则持久化）
-- **SELinux 兼容**：CentOS/RHEL/Anolis 自动设置 httpd_sys_content_t 上下文
-- **失败自动回滚**：部署过程中任意步骤失败自动回滚所有变更（覆盖安装时还原旧配置）
-- **管理脚本**：部署后提供 `proxy-manager` 命令管理服务（含配置测试、订阅地址查询）
-- **密钥兜底**：多种 X25519 密钥提取与校验模式（含 JSON、正则、OpenSSL 本地生成等 5 种兜底），兼容不同 Xray 版本输出
-
-## 支持的操作系统
-
-| 发行版 | 版本要求 | 包管理器 | 服务管理器 | 备注 |
-|-------|---------|---------|-----------|------|
-| Ubuntu | 16.04+ | apt | systemd | |
-| Debian | 9+ | apt | systemd | |
-| CentOS | 7+ | yum/dnf | systemd | |
-| RHEL | 7+ | yum/dnf | systemd | |
-| Rocky Linux | 8+ | dnf | systemd | |
-| AlmaLinux | 8+ | dnf | systemd | |
-| Anolis OS（龙蜥） | 8+ | dnf | systemd | |
-| Fedora | 29+ | dnf | systemd | |
-| openSUSE | Leap 15+ / Tumbleweed | zypper | systemd | |
-| Arch Linux / Manjaro | 滚动版 | pacman | systemd | |
-| Alpine Linux | 3.12+ | apk | OpenRC | 需预装 bash，OpenRC 路径未经充分测试 |
-| Amazon Linux | 2/2023 | yum/dnf | systemd | |
-| openEuler（欧拉） | 20.03+ | dnf | systemd | |
-
-> 容器环境（OpenVZ/LXC）下 Swap 创建失败不会中断部署；内核需 4.9+ 以支持 BBR。
-
-## 重要提示
-
-- **订阅默认走 HTTP**：部署完成后生成的订阅链接是 `http://IP:10707/随机路径`。HTTP 明文传输可能被中间人截获，建议仅在可信网络使用，或通过 SFTP/SCP 直接下载 `/usr/share/nginx/html/clash.yaml` 到本地。如需 HTTPS 必须自备域名和证书。最安全的做法是不通过公网订阅链接，直接用 SFTP/SCP 把配置文件拉到本地。
-- **TLS 节点需跳过证书校验**：8443 端口使用自签名证书，客户端必须开启 `skip-cert-verify`。
-- **Reality 是主力节点**：443 端口 Reality 节点无需额外设置，推荐日常使用；TLS 与 XHTTP 作为备用/兼容性节点。
-
 ## 部署流程
 
 脚本共执行 **14 个步骤**（另有预检和结果输出）：
@@ -137,23 +137,23 @@ bash install.sh
 
 ## 节点配置
 
-当前采用**单域名单端口 Reality**设计：默认伪装目标 `updates.cdn-apple.com:443` 对应一个 Reality 入站，再搭配 TLS（8443）与 XHTTP（8880）两个备用入站，共 **3 个节点**。节点命名格式为 `<网络类型>-<CDN标签>`（如 `Reality-Apple-Update`）。
+当前采用**单域名单端口 Reality**设计：默认伪装目标 `cdn-dynmedia-1.microsoft.com:443` 对应一个 Reality 入站，再搭配 TLS（8443）与 XHTTP（8880）两个备用入站，共 **3 个节点**。节点命名格式为 `<网络类型>-<CDN标签>`（如 `Reality-Microsoft-CDN`）。
 
-- 若主目标预检失败并从备用池自动替补，则三个节点会共享同一个 fallback 域名（如 `Reality-Microsoft-CDN`、`TLS-Microsoft-CDN`、`XHTTP-Microsoft-CDN`），仅端口不同；
+- 若主目标预检失败并从备用池自动替补，则三个节点会共享同一个 fallback 域名（如 `Reality-Apple-Update`、`TLS-Apple-Update`、`XHTTP-Apple-Update`），仅端口不同；
 - 如需扩展，往脚本头部 `REALITY_CDNS` 数组添加 `域名|端口|标签` 即可自动级联生成 Reality/TLS/XHTTP 三组节点。不同 Reality 入站必须使用不同端口，不可同时占用 443。
 
 | 伪装 CDN | 节点标签 | Reality 端口 | dest |
 |---------|---------|-------------|------|
-| updates.cdn-apple.com | Apple-Update | 443 | updates.cdn-apple.com:443 |
+| cdn-dynmedia-1.microsoft.com | Microsoft-CDN | 443 | cdn-dynmedia-1.microsoft.com:443 |
 
 | 网络类型 | 端口 | 协议 | 传输 | 加密 | 用途 |
 |---------|------|------|------|------|------|
 | Reality | 443 | VLESS | TCP + Vision | Reality | 主力推荐，防探测；订阅配置含 Fragment 分片 |
-| TLS | 8443 | VLESS | TCP + Vision | TLS（自签） | 备用节点，SNI 为 Apple-Update 域名 |
-| XHTTP | 8880 | VLESS | XHTTP | Reality | CDN 兼容，Reality 安全层，SNI 为 Apple-Update 域名 |
+| TLS | 8443 | VLESS | TCP + Vision | TLS（自签） | 备用节点，SNI 为 Microsoft-CDN 域名 |
+| XHTTP | 8880 | VLESS | XHTTP | Reality | CDN 兼容，Reality 安全层，SNI 为 Microsoft-CDN 域名 |
 
 - **Fragment**：TLS Client Hello 分片（100-200字节，间隔10-50ms），增强抗检测能力；由 Clash Meta 客户端在订阅侧生效，服务端 Xray 不再配置 fragment
-- **Reality**：单域名单端口，探测者只能看到 443 上苹果系统更新 CDN 的真实证书；默认 dest 支持 TLS1.3 + h2，证书链干净（Apple 企业 CA）
+- **Reality**：单域名单端口，探测者只能看到 443 上 Microsoft 动态媒体 CDN 的真实证书；默认 dest 支持 TLS1.3 + h2，证书链干净（Microsoft 企业 CA）
 - **Vision**：XTLS Vision 流控，提供高性能代理
 - **XHTTP**：基于 HTTP/2 的 XHTTP 传输 + Reality 安全层（无需自签证书），支持 CDN 中转
 - **订阅分组**：Proxy → Reality / TLS / XHTTP 三个子分组，仅手动 `select`，不含 url-test 与 fallback
@@ -168,14 +168,14 @@ bash install.sh
 - 多端口 + 多域名组合容易被特征库收录；
 - Bing、Apple 下载 CDN 等目标已被大量教程用滥，指纹嘈杂。
 
-新版收敛为单域名单端口：默认 dest `updates.cdn-apple.com:443`，对应真实世界中存在的苹果系统更新 CDN 服务器形态，探测者只能看到一个干净的企业级 CDN 证书。
+新版收敛为单域名单端口：默认 dest `cdn-dynmedia-1.microsoft.com:443`，对应真实世界中存在的微软动态媒体 CDN 服务器形态，探测者只能看到一个干净的企业级 CDN 证书。
 
 ### dest 预检与备用池
 
 部署 Step 7 会调用 `check_reality_dest`，用 `openssl s_client -tls1_3 -alpn h2` 实测每个目标：
 
-1. 主目标 `updates.cdn-apple.com` 通过预检则直接使用；
-2. 主目标失败时，按序尝试备用池：`cdn-dynmedia-1.microsoft.com` → `iosapps.itunes.apple.com` → `download-porter.hoyoverse.com` → `osxapps.itunes.apple.com` → `music.apple.com` → `tv.apple.com` → `www.mi.com` → `buylite.music.apple.com` → `www.lamer.com.hk`；**只会采用第一个通过预检的域名**，不会同时部署多个；
+1. 主目标 `cdn-dynmedia-1.microsoft.com` 通过预检则直接使用；
+2. 主目标失败时，按序尝试备用池：`updates.cdn-apple.com` → `iosapps.itunes.apple.com` → `download-porter.hoyoverse.com` → `osxapps.itunes.apple.com` → `music.apple.com` → `tv.apple.com` → `www.mi.com` → `buylite.music.apple.com` → `www.lamer.com.hk`；**只会采用第一个通过预检的域名**，不会同时部署多个；
 3. 备用池全部失败时，脚本会告警但**继续部署不阻断**（可能是服务器出网受限，客户端侧未必不可用），并默认使用备用池第一个域名继续生成配置。
 
 这套机制让脚本在默认域名失效时仍能自愈，无需手动修改代码。
@@ -206,8 +206,6 @@ bash install.sh
 - **白名单模式**：未匹配的流量默认走代理（MATCH=Proxy），确保所有被封锁站点正常访问
 
 > 订阅链接默认通过 HTTP 在 `10707` 端口提供。如需 HTTPS，可在前端部署 Nginx/Caddy 配置有效证书。
->
-> **规则集下载源可配置**：默认使用 jsdelivr CDN。国内网络拉取规则失败时，可编辑 `install.sh` 头部的 `RULES_CDN_PREFIX` 变量，改为 GitHub 直连（`https://raw.githubusercontent.com/Loyalsoldier/clash-rules@release`）或 ghproxy 镜像后重新部署。
 
 ## DNS 优化
 
@@ -250,7 +248,7 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 
 | 端口 | 协议 | 用途 |
 |-----|------|------|
-| 443 | TCP | Reality 主力节点 - Apple-Update（updates.cdn-apple.com） |
+| 443 | TCP | Reality 主力节点 - Microsoft-CDN（cdn-dynmedia-1.microsoft.com） |
 | 8443 | TCP | VLESS TLS 备用节点（自签证书） |
 | 8880 | TCP | VLESS XHTTP CDN 兼容节点（Reality 安全层） |
 | 10707 | TCP | Clash 订阅 HTTP 端点（可修改） |
@@ -286,7 +284,7 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 - **BBR 拥塞控制** + `fq` 队列调度
 - **TCP 缓冲区**：根据带宽智能计算（公式：带宽 × 12500 字节，100ms RTT），上限 64MB，下限 1MB
 - **连接队列**：随带宽缩放（≤200M: 8192 / ≤1000M: 16384 / >1000M: 32768）
-- **UDP 缓冲区**：复用 `net.core.rmem_max` / `wmem_max`（随 TCP 同步放大），减少 UDP 中继/QUIC 丢包
+- **UDP 缓冲区**：与 TCP 缓冲区同步缩放，减少 UDP 中继/QUIC 丢包
 - **TCP Fast Open**：启用 TFO
 - **MTU 探测**：自动 PMTU 发现
 - **文件描述符**：系统级 1048576，服务级 131072
@@ -310,8 +308,9 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 
 | 包 | 用途 |
 |---|------|
-| curl | 文件下载、IP 获取 |
+| curl / wget | 文件下载 |
 | unzip | Xray 压缩包解压 |
+| socat | 网络工具（端口检测） |
 | jq | JSON 解析（配置管理） |
 | openssl | 证书生成、随机数 |
 | nginx | 订阅文件 HTTP 服务 |
@@ -329,45 +328,15 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 
 ## 版本更新说明
 
-### v4.5.5
+### v4.5
 
-- **Clash 分流严格对齐官方规则**：rule-providers 补齐 `gfw` / `tld-not-cn` 两个规则集，与 Loyalsoldier/clash-rules 官方 README 的 13 个 provider 完全一致；`icloud` / `apple` 域名由走代理改回官方默认的 `DIRECT`；rules 条目与顺序保持与官方白名单模式逐条一致（官方示例中的 `PROXY` 策略对应本配置的 `Proxy` 分组）。
-
-### v4.5.4
-
-- **修复 `limit_req` 检测失效**：检测用临时配置文件名以 `.` 开头，而 nginx include 走 libc `glob()`（`*` 不匹配 dot 文件），测试文件永不生效导致检测恒为可用；改为非点文件名并在写入前清理历史残留，未编译该模块的自定义构建上不再误报；
-- **修复回滚后原站点 404**：回滚时 `restore_nginx_default_vhosts` 恢复 vhost 文件后 nginx 未重载（进程在跑但站点 404），恢复后补一次 `restart/start` 兜底；
-- **订阅路径持久化**：`SUB_PATH`（随机 16 位 hex）现在写入 `/etc/proxy-manager.env`，nginx 配置丢失后 `proxy-manager info/sub` 仍能恢复完整订阅地址；
-- **`show_info` 订阅信息恢复**：优先使用 env 持久化的 `SUB_PORT`/`SUB_PATH`（缺失时退回 sed 提取），并补充 `/etc/nginx/http.d/proxy-sub.conf` 查找兜底；
-- **修复自定义订阅名 EOF 死循环**：stdin 输入中断（EOF）时不再无限循环提示，自动回退默认文件名；
-- **proxy-manager 补 `disable` 分支**：非 systemd（sysvinit/OpenRC）系统上 `uninstall` 的 `disable` 调用此前静默无效，现可正确移除开机自启；
-- **修复 Swap 已激活误报**：`/swapfile` 已在 `/proc/swaps` 中激活时不再因 `swapon` 报 busy 而误报"无法启用"；
-- **卸载兜底**：`proxy-manager uninstall` 恢复默认 vhost 时显式覆盖 `/etc/nginx/http.d/default.conf`（env 丢失的 Alpine 场景）。
-
-### v4.5.3
-
-- **修复中断无回滚**：部署中途 Ctrl+C / SIGTERM 中断现在会触发完整回滚并释放并发锁（新增 INT/TERM trap + 幂等保护，防止 EXIT/INT 双触发重复回滚）；
-- **修复 `limit_req` 检测失效**：`limit_req` 是 nginx 默认编译模块，`nginx -V` 的 configure 参数不包含模块名，原 grep 检测恒不命中导致限速静默失效；改为写入临时配置 + `nginx -t` 实测检测；
-- **修复 nginx 重启失败误报**：`nginx -t` 通过但服务重启失败时，不再误报"配置错误/端口占用"并删除配置，改为单独提示服务错误并输出日志；
-- **修复 uninstall 误删用户配置**：`/etc/systemd/system/xray.service.d` 改为只删除脚本写入的 `limits.conf` 再 rmdir，不再 `rm -rf` 整个目录（与 nginx 处理一致）；
-- **修复 Swap 失败残留磁盘文件**：`swapon` 启用失败时删除 fallocate 创建的文件，避免容器环境白占磁盘；
-- **移除未使用的依赖**：`socat` / `wget` 脚本内零调用，从自动安装列表移除；
-- **回滚噪音优化**：并发锁冲突等早期失败不再打印空转的"部署失败，开始回滚"提示；
-- **卸载兜底**：`proxy-manager uninstall` 增加 `/etc/nginx/http.d/proxy-sub.conf` 显式清理。
-
-### v4.5.2
-
-- **修复 Alpine 订阅端点失效**：Nginx 配置按发行版写入 `http.d/`（Alpine）或 `conf.d/`（其他发行版），Alpine 上订阅端点不再 404；默认 vhost 禁用/恢复逻辑同步覆盖 `http.d/default.conf`；
-- **修复悬空符号链接清理死代码**：`sites-enabled` 中残留的悬空链接现在会被正确删除，避免 nginx include 报 emerg 导致 `nginx -t` 失败；
-- **移除无效 sysctl**：`net.core.rmem_udp_max` / `net.core.wmem_udp_max` 在 Linux 内核中不存在（会产生开机告警且不生效），UDP 缓冲复用 `net.core.rmem_max` / `wmem_max`；
-- **卸载后重启 Nginx**：`proxy-manager uninstall` 现在会重启 nginx，使默认 vhost 恢复生效、订阅端点移除；
-- **回滚补齐**：`/etc/security/limits.d/99-proxy.conf` 加入回滚栈；
-- **Reality dest 预检超时兜底**：`timeout` 命令缺失时改用后台进程 + 定时 kill，避免对不可达目标无限挂起；
-- **apt 源更新容错**：`apt-get update` / `upgrade` 失败不再直接中止部署，改为告警后继续；
-- **订阅端点限速**：Nginx 启用 `limit_req`（5r/s，burst 10），未编译该模块的自定义 nginx 构建自动跳过；
-- **分流规则源可配置**：新增 `RULES_CDN_PREFIX` 变量，jsdelivr 不可用时可在脚本头部替换为 GitHub 直连或 ghproxy 镜像；
-- **并发保护**：新增锁文件（含陈旧锁清理），防止多个实例同时运行互相干扰；
-- **其他**：IP 检测强制 IPv4（`curl -4`）、`proxy-manager status` 增加订阅端口检查、移除无用 sysctl 备份逻辑、README 版本号统一。
+- 移除服务端无效 fragment 配置，Fragment 分片改在 Clash 订阅侧生效；
+- 优化 Web 服务处理：仅停止运行中的 nginx/apache2/httpd/caddy，并在回滚或部署完成后自动恢复非冲突服务；
+- 改进 nginx 默认 vhost 处理：禁用默认站点时采用“符号链接删除 + 真实文件重命名”，避免残留悬空链接导致 `nginx -t` 失败；卸载时自动恢复默认 vhost；
+- XHTTP inbound 补齐 `quic` / `routeOnly` 等 sniffing 配置；
+- `pkill` 使用 `-x` 精确匹配，防止误杀其他进程；
+- 配置语义预检（`xray run -test`）调整至证书生成之后，避免证书尚未生成时预检必然失败；
+- 订阅路径生成改用 `openssl rand -hex 8` 定长输出，避免 `tr | head` 管道被 SIGPIPE 截断导致静默回滚。
 
 ### v4.5.1
 
@@ -382,16 +351,6 @@ proxy-manager uninstall  # 完全卸载代理服务（含配置文件和证书�
 - **改进 Xray 版本可观测性**：安装后打印实际版本号；
 - **改进回滚栈 eval 安全约束**：添加注释明确仅限硬编码字符串；
 - **修正文档**：订阅更新间隔描述（滚动 24h 而非固定 06:30）、低内存提示条件（Swap < 2GB 而非 RAM < 1GB）、v2rayN/v2rayNG 订阅格式说明。
-
-### v4.5
-
-- 移除服务端无效 fragment 配置，Fragment 分片改在 Clash 订阅侧生效；
-- 优化 Web 服务处理：仅停止运行中的 nginx/apache2/httpd/caddy，并在回滚或部署完成后自动恢复非冲突服务；
-- 改进 nginx 默认 vhost 处理：禁用默认站点时采用“符号链接删除 + 真实文件重命名”，避免残留悬空链接导致 `nginx -t` 失败；卸载时自动恢复默认 vhost；
-- XHTTP inbound 补齐 `quic` / `routeOnly` 等 sniffing 配置；
-- `pkill` 使用 `-x` 精确匹配，防止误杀其他进程；
-- 配置语义预检（`xray run -test`）调整至证书生成之后，避免证书尚未生成时预检必然失败；
-- 订阅路径生成改用 `openssl rand -hex 8` 定长输出，避免 `tr | head` 管道被 SIGPIPE 截断导致静默回滚。
 
 ## 故障排查
 
@@ -455,7 +414,7 @@ nginx -t                                  # Nginx 配置测试
 | Xray 程序 | `/usr/local/bin/xray` |
 | Clash 订阅文件 | `/usr/share/nginx/html/clash.yaml`（或 `/var/www/html/`） |
 | VLESS 通用订阅 | `/usr/share/nginx/html/nodes.txt`（原始）+ `nodes_base64.txt`（base64） |
-| Nginx 配置 | `/etc/nginx/conf.d/proxy-sub.conf`（Alpine 为 `/etc/nginx/http.d/proxy-sub.conf`） |
+| Nginx 配置 | `/etc/nginx/conf.d/proxy-sub.conf` |
 | 管理脚本 | `/usr/local/bin/proxy-manager` |
 | 管理脚本参数 | `/etc/proxy-manager.env` |
 | 系统优化配置 | `/etc/sysctl.d/99-proxy-optimized.conf` |
