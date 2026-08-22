@@ -4,8 +4,17 @@ set -e -o pipefail
 export LC_ALL=C
 
 # ============================================
-# Xray Proxy Install Script v4.5.5
+# Xray Proxy Install Script v4.5.7
 # Protocol: VLESS + Reality + Vision + Fragment（Fragment 在客户端订阅侧生效）
+# v4.5.7: 并发锁改 PID+starttime 双字段判定（免疫 PID 复用与僵尸进程误判，兼容 bash <(curl) 形态）、
+#       非交互 stdin 自动转无人值守模式（防 curl|bash 管道执行吞脚本字节）、dest 兜底保留原端口且
+#       DEST_FALLBACKS 统一为 3 字段格式、Swap 创建逻辑抽函数并仅全新创建时加回滚项、
+#       limit_req 探测三态化并打印探测阶段真实报错、firewalld 批量放行单次 reload、
+#       删除无 timeout 的 killer 子 shell 分支（缺 timeout 时跳过咨询性预检）、rp_filter 前提注释
+# v4.5.6: ShellCheck 清理 + 审查问题修复：Swap 创建失败不再中止部署、BusyBox dd 兼容、
+#       config.json/proxy-manager.env 权限收敛、limit_req 检测改判错误文案、uninstall 默认
+#       vhost 恢复清单对齐安装时、健康检查 HTTP 码兜底、预检日志 mktemp、未知参数告警、
+#       fs.file-max 只升不降、Xray 回滚卸载由长 eval 字符串改为函数
 # v4.5.5: Clash 分流严格对齐 Loyalsoldier/clash-rules 官方白名单模式：补齐 gfw / tld-not-cn
 #       两个 rule-providers；icloud / apple 域名由走代理改回官方默认 DIRECT
 # v4.5.4: 修复 limit_req 检测失效（测试文件名带点，*.conf 通配永不匹配，检测恒为可用）、
@@ -47,6 +56,9 @@ for arg in "$@"; do
             echo "  -h, --help  显示帮助"
             exit 0
             ;;
+        *)
+            echo "[WARN] 未知参数: $arg（已忽略）"
+            ;;
     esac
 done
 
@@ -55,7 +67,15 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 
-# 进度提示
+# 非交互 stdin 守卫：curl|bash 管道执行时 bash 增量读取脚本，任何 read 都会把后续
+# 脚本文本当作输入吞掉，轻则变量拿到乱值、重则解析错位崩溃。检测到非终端 stdin
+# 时强制无人值守模式（AUTO_YES 分支已覆盖全部 read 提示，EOF 场景均有安全默认值）
+if [ ! -t 0 ]; then
+    warn "未检测到交互终端（stdin 非终端），自动启用无人值守模式"
+    AUTO_YES=1
+fi
+
+# 进度提示（STEP_TOTAL 需与下方 step 调用次数保持同步）
 STEP_TOTAL=14
 STEP_CURRENT=0
 step() {
@@ -92,10 +112,31 @@ rollback() {
     exit 1
 }
 
-release_lock() {
-    if [ -n "${LOCK_FILE:-}" ] && [ -f "$LOCK_FILE" ] && [ "$(cat "$LOCK_FILE" 2>/dev/null)" = "$$" ]; then
-        rm -f "$LOCK_FILE"
+# 从 /proc/<pid>/stat 安全提取字段。
+# comm(第2字段)可含空格甚至嵌套括号，必须先贪婪剥到最后一个 ")" 再按空格切分：
+# 剥离后第 1 字段=state(R/S/D/Z/T...)，第 20 字段=starttime(开机以来时钟滴答，进程化身标识)
+proc_stat_field() {
+    local pid=$1 n=$2 stat_line
+    # 格式为 "<pid> (<comm>) <state> ..."：pid 与 "(" 之间有空格，不可遗漏
+    stat_line=$(sed -n 's/^[0-9]\+ (.*) //p' "/proc/${pid}/stat" 2>/dev/null) || return 1
+    if [ -z "$stat_line" ]; then
+        return 1
     fi
+    printf '%s\n' "$stat_line" | awk -v f="$n" '{print $f}'
+}
+
+release_lock() {
+    # 仅当锁内容与本次实例完全一致（格式头+PID+starttime 三元组）才删除，
+    # 防止异常情况下误删其他实例持有的锁；末尾强制成功，避免 trap 列表被 set -e 打断
+    local lock_content my_start
+    if [ -n "${LOCK_FILE:-}" ] && [ -f "$LOCK_FILE" ]; then
+        lock_content=$(cat "$LOCK_FILE" 2>/dev/null) || true
+        my_start=$(proc_stat_field "$$" 20) || true
+        if [ "$lock_content" = "${LOCK_FORMAT} $$ ${my_start}" ]; then
+            rm -f "$LOCK_FILE"
+        fi
+    fi
+    return 0
 }
 
 # EXIT/INT/TERM 统一走 release_lock + rollback：
@@ -106,16 +147,76 @@ add_rollback() {
     ROLLBACK_LOG=("$1" "${ROLLBACK_LOG[@]}")
 }
 
+# 回滚时卸载 Xray（仅全新安装场景）：先下载官方卸载脚本到临时文件，校验非空后执行。
+# 封装为函数，回滚栈只存函数名，避免原先 700 字符多层转义的 eval 长字符串
+rollback_uninstall_xray() {
+    local rb_tmp
+    rb_tmp=$(mktemp 2>/dev/null || echo "/tmp/xray-rb.$$.sh")
+    if curl -fsSL "${XRAY_INSTALL_URL}" -o "$rb_tmp" 2>/dev/null && [ -s "$rb_tmp" ]; then
+        # 用 bash tmpfile remove（不带 @）：file 成为 $0，remove 成为 $1，避免 bash -c 嵌套引号地狱
+        bash "$rb_tmp" remove 2>/dev/null || echo "[WARN] Xray 回滚卸载脚本执行失败，请手动清理"
+    else
+        echo "[WARN] 无法下载 Xray 卸载脚本（GitHub 不可达），请手动执行: bash -c \"\$(curl -fsSL ${XRAY_INSTALL_URL})\" @ remove"
+    fi
+    rm -f "$rb_tmp"
+}
+
 # 并发保护：防止多个实例同时运行互相干扰
-# noclobber 使 > 具备 O_EXCL 原子语义；残留的陈旧锁（PID 已不存在）会被清理
-LOCK_FILE="/tmp/xray-proxy-install.lock"
+# 锁格式: "xlock <pid> <starttime>"（空格分隔单行）
+# 仅凭 kill -0 判活无法识别两种陈旧锁：
+#   1) 旧实例退出后 PID 被无关进程复用——kill -0 成功但已非当初的进程；
+#   2) 旧实例变成僵尸进程——kill -0 对僵尸同样返回成功。
+# 因此引入 starttime（/proc/<pid>/stat 第22字段，同一 PID 的不同化身必然不同）做
+# 化身校验，并显式读取 state 字段判 Z。方案不依赖 cmdline 形态，
+# bash <(curl ...) / curl|bash / 直接执行均可正确判定。
+# xlock 格式头仅用于识别同路径脏数据（其他工具误写时直接清除）。
+# noclobber 使 > 具备 O_EXCL 原子语义；锁优先放 /run（tmpfs，重启自动清理），无 /run 回退 /tmp
+LOCK_DIR="/run"
+[ -d "$LOCK_DIR" ] || LOCK_DIR="/tmp"
+LOCK_FILE="${LOCK_DIR}/xray-proxy-install.lock"
+LOCK_FORMAT="xlock"
+
+lock_is_stale() {
+    # 返回 0 = 陈旧锁可清除；返回 1 = 有效锁（存在并发实例）或读取失败需保守保留
+    local old_pid=$1 old_start=$2 cur_start cur_state
+    # 双字段必须为纯数字，畸形内容一律视为陈旧清除
+    case "${old_pid}" in ''|*[!0-9]*) return 0 ;; esac
+    case "${old_start}" in ''|*[!0-9]*) return 0 ;; esac
+    if ! kill -0 "$old_pid" 2>/dev/null; then
+        return 0                       # 进程不存在：陈旧
+    fi
+    cur_start=$(proc_stat_field "$old_pid" 20) || return 1
+    cur_state=$(proc_stat_field "$old_pid" 1) || return 1
+    if [ "$cur_start" != "$old_start" ]; then
+        return 0                       # starttime 不等：PID 已被复用，陈旧
+    fi
+    [ "$cur_state" = "Z" ]             # 同化身：僵尸等同已死；否则为活跃实例
+}
+
 if [ -f "$LOCK_FILE" ]; then
-    OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
-    if [ -n "$OLD_PID" ] && ! kill -0 "$OLD_PID" 2>/dev/null; then
-        rm -f "$LOCK_FILE"
+    OLD_LOCK_LINE=""
+    # cat 失败（权限异常/竞态）：保守保留现有锁，宁可误报也不误删他人在用的锁
+    if ! OLD_LOCK_LINE=$(cat "$LOCK_FILE" 2>/dev/null); then
+        :
+    elif [ -z "${OLD_LOCK_LINE}" ]; then
+        rm -f "$LOCK_FILE"             # 空文件：脏数据，直接清除
+    else
+        OLD_FORMAT="${OLD_LOCK_LINE%% *}"
+        OLD_PID="${OLD_LOCK_LINE#* }"
+        OLD_PID="${OLD_PID%% *}"
+        OLD_START="${OLD_LOCK_LINE##* }"
+        if [ "$OLD_FORMAT" != "$LOCK_FORMAT" ] || lock_is_stale "$OLD_PID" "$OLD_START"; then
+            rm -f "$LOCK_FILE"
+        fi
     fi
 fi
-if ! ( set -o noclobber; echo "$$" > "$LOCK_FILE" ) 2>/dev/null; then
+
+# || true 先兜住 set -e：读取失败时走下方判空报错，而非静默退出
+MY_STARTTIME=$(proc_stat_field $$ 20) || MY_STARTTIME=""
+if [ -z "$MY_STARTTIME" ]; then
+    error "无法读取自身 /proc/$$/stat（本脚本依赖 procfs），部署中止"
+fi
+if ! ( set -o noclobber; printf '%s %s %s\n' "$LOCK_FORMAT" "$$" "$MY_STARTTIME" > "$LOCK_FILE" ) 2>/dev/null; then
     error "检测到 install.sh 已在运行（锁文件 ${LOCK_FILE}），本次部署中止"
 fi
 
@@ -134,17 +235,17 @@ REALITY_CDNS=(
     "updates.cdn-apple.com|443|Apple-Update"
 )
 
-# dest 预检失败时的备用候选（域名|标签），按序尝试
+# dest 预检失败时的备用候选，按序尝试（格式与 REALITY_CDNS 统一为 域名|Reality端口|节点标签）
 DEST_FALLBACKS=(
-    "cdn-dynmedia-1.microsoft.com|Microsoft-CDN"
-    "iosapps.itunes.apple.com|Apple-iTunes"
-    "download-porter.hoyoverse.com|Hoyoverse"
-    "osxapps.itunes.apple.com|Apple-macOS"
-    "music.apple.com|Apple-Music"
-    "tv.apple.com|Apple-TV"
-    "www.mi.com|Xiaomi"
-    "buylite.music.apple.com|Apple-Music-Lite"
-    "www.lamer.com.hk|LaMer"
+    "cdn-dynmedia-1.microsoft.com|443|Microsoft-CDN"
+    "iosapps.itunes.apple.com|443|Apple-iTunes"
+    "download-porter.hoyoverse.com|443|Hoyoverse"
+    "osxapps.itunes.apple.com|443|Apple-macOS"
+    "music.apple.com|443|Apple-Music"
+    "tv.apple.com|443|Apple-TV"
+    "www.mi.com|443|Xiaomi"
+    "buylite.music.apple.com|443|Apple-Music-Lite"
+    "www.lamer.com.hk|443|LaMer"
 )
 
 # 固定 Xray 版本，避免上游输出格式变化导致部署不可复现；失败时自动回退到最新版
@@ -176,22 +277,18 @@ SUB_PORT=10707
 # ============================================
 detect_distro() {
     DISTRO_ID="unknown"
-    DISTRO_LIKE="unknown"
     PKG_MANAGER="unknown"
 
     if [ -f /etc/os-release ]; then
+        # shellcheck source=/dev/null
         . /etc/os-release
         DISTRO_ID="${ID,,}"
-        DISTRO_LIKE="${ID_LIKE,,}"
     elif [ -f /etc/redhat-release ]; then
         DISTRO_ID="rhel"
-        DISTRO_LIKE="rhel"
     elif [ -f /etc/arch-release ]; then
         DISTRO_ID="arch"
-        DISTRO_LIKE="arch"
     elif [ -f /etc/alpine-release ]; then
         DISTRO_ID="alpine"
-        DISTRO_LIKE="alpine"
     fi
 
     if command -v apt-get &>/dev/null; then
@@ -319,6 +416,35 @@ check_port() {
     fi
 }
 
+# 创建 swapfile：fallocate 优先，dd 兜底（BusyBox dd 不支持 status=progress 等 GNU 专有参数）
+# 任一步失败返回非零，由调用方兜底处理；Swap 属可选增强，失败不得中止部署
+create_swapfile() {
+    local size_mb=$1
+    { fallocate -l "${size_mb}M" /swapfile 2>/dev/null \
+        || dd if=/dev/zero of=/swapfile bs=1M count="$size_mb"; } \
+    && chmod 600 /swapfile \
+    && mkswap /swapfile >/dev/null 2>&1
+}
+
+# 激活新建的 swapfile 并按需写入 fstab；结果经全局变量 SWAP_OK 反馈（1=成功启用）。
+# 失败路径清理残留文件（fallocate/dd 已真实占用磁盘），不中止部署
+setup_swapfile() {
+    SWAP_OK=0
+    if swapon /swapfile 2>/dev/null; then
+        SWAP_OK=1
+    else
+        warn "Swap 启用失败（容器环境可能不支持），将继续部署"
+        rm -f /swapfile
+        return 0
+    fi
+    # 仅在 swap 实际启用成功时才写入 fstab，避免每次开机产生挂载失败日志；
+    # 锚定行首匹配，避免误判其他包含 /swapfile 子串的挂载点
+    if ! grep -qE '^/swapfile[[:space:]]' /etc/fstab 2>/dev/null; then
+        echo '/swapfile none swap sw,nofail 0 0' >> /etc/fstab
+    fi
+    return 0
+}
+
 # 提取 IP 地址（不使用 grep -P）
 extract_ip() {
     # grep 无匹配时返回 1，pipefail 下会使赋值失败触发 set -e 静默退出，需 || true 兜底
@@ -343,7 +469,7 @@ for src in ifconfig.me ipinfo.io/ip ip.sb icanhazip.com; do
     SERVER_IP=$(extract_ip "$RESP")
     [ -n "$SERVER_IP" ] && break
 done
-[ -z "$SERVER_IP" ] && error "无法获取服务器公网 IP"
+[ -z "$SERVER_IP" ] && error "无法获取服务器公网 IPv4 地址（暂不支持纯 IPv6-only 环境）"
 log "服务器 IP: ${SERVER_IP}"
 
 # Reality 握手校验时间戳，系统时钟必须准确
@@ -403,7 +529,7 @@ else
 
         if [ -f /swapfile ]; then
             warn "检测到已存在 /swapfile"
-            SWAP_CUR_SIZE=$(ls -lh /swapfile | awk '{print $5}')
+            SWAP_CUR_SIZE=$(du -h /swapfile 2>/dev/null | awk '{print $1}')
             echo -e "当前大小: ${SWAP_CUR_SIZE}"
             echo -e "${YELLOW}是否重新创建为 ${SWAP_SIZE_MB} MB？(y/n)${NC}"
             read -r -p "请选择: " RECREATE_SWAP || RECREATE_SWAP=""
@@ -418,44 +544,33 @@ else
                 else
                     warn "现有 Swap 无法启用（容器环境可能不支持）"
                 fi
-                TOTAL_SWAP_MB=$(awk '/SwapTotal/ {print int($2/1024)}' /proc/meminfo)
-                log "当前 Swap: ${TOTAL_SWAP_MB} MB"
             else
+                # 用户已确认替换旧 Swap：旧文件无法复原，回滚时保留新文件是损失最小的终态，
+                # 因此重建场景不加回滚项（仅全新创建才回滚，见下方分支）
                 swapoff /swapfile 2>/dev/null || true
                 rm -f /swapfile
-                fallocate -l "${SWAP_SIZE_MB}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_SIZE_MB" status=progress
-                chmod 600 /swapfile
-                mkswap /swapfile
-                if swapon /swapfile 2>/dev/null; then
-                    SWAP_OK=1
+                log "创建 ${SWAP_SIZE_MB} MB Swap 文件..."
+                if create_swapfile "$SWAP_SIZE_MB"; then
+                    setup_swapfile
                 else
-                    SWAP_OK=0
-                    warn "Swap 启用失败（容器环境可能不支持），将继续部署"
-                    # fallocate 已真实占用磁盘，启用失败时删除文件避免白占空间
+                    warn "Swap 文件创建失败（文件系统/容器可能不支持），跳过 Swap 继续部署"
                     rm -f /swapfile
-                fi
-                # 仅在 swap 实际启用成功时才写入 fstab，避免每次开机产生挂载失败日志
-                if [ "$SWAP_OK" -eq 1 ] && ! grep -q '/swapfile' /etc/fstab; then
-                    echo '/swapfile none swap sw,nofail 0 0' >> /etc/fstab
                 fi
                 [ "$SWAP_OK" -eq 1 ] && log "${SWAP_SIZE_MB} MB Swap 创建成功"
             fi
         else
             log "创建 ${SWAP_SIZE_MB} MB Swap 文件..."
-            fallocate -l "${SWAP_SIZE_MB}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_SIZE_MB" status=progress
-            chmod 600 /swapfile
-            mkswap /swapfile
-            if swapon /swapfile 2>/dev/null; then
-                SWAP_OK=1
+            if create_swapfile "$SWAP_SIZE_MB"; then
+                setup_swapfile
+                # 仅全新创建的 Swap 加回滚项（撤销本脚本的系统级改动）；
+                # 已存在的用户 Swap 不在回滚范围内。
+                # 注意 sed 备选地址分隔符必须带前导反斜杠（\|re|d）
+                if [ "$SWAP_OK" -eq 1 ]; then
+                    add_rollback "swapoff /swapfile 2>/dev/null || true; rm -f /swapfile; sed -i '\\|^/swapfile |d' /etc/fstab 2>/dev/null || true"
+                fi
             else
-                SWAP_OK=0
-                warn "Swap 启用失败（容器环境可能不支持），将继续部署"
-                # fallocate 已真实占用磁盘，启用失败时删除文件避免白占空间
+                warn "Swap 文件创建失败（文件系统/容器可能不支持），跳过 Swap 继续部署"
                 rm -f /swapfile
-            fi
-            # 仅在 swap 实际启用成功时才写入 fstab，避免每次开机产生挂载失败日志
-            if [ "$SWAP_OK" -eq 1 ] && ! grep -q '/swapfile' /etc/fstab; then
-                echo '/swapfile none swap sw,nofail 0 0' >> /etc/fstab
             fi
             [ "$SWAP_OK" -eq 1 ] && log "${SWAP_SIZE_MB} MB Swap 创建成功"
         fi
@@ -484,8 +599,12 @@ if command -v xray &>/dev/null && [ -f /usr/local/etc/xray/config.json ]; then
     warn "检测到已安装 Xray，将进行覆盖安装（原配置已备份，部署失败时自动还原）"
     PREV_CONFIG_BACKUP="/usr/local/etc/xray/config.json.prevbak"
     cp -f /usr/local/etc/xray/config.json "$PREV_CONFIG_BACKUP" 2>/dev/null || PREV_CONFIG_BACKUP=""
-    [ -f /etc/xray/server.crt ] && cp -f /etc/xray/server.crt /etc/xray/server.crt.prevbak 2>/dev/null || true
-    [ -f /etc/xray/server.key ] && cp -f /etc/xray/server.key /etc/xray/server.key.prevbak 2>/dev/null || true
+    if [ -f /etc/xray/server.crt ]; then
+        cp -f /etc/xray/server.crt /etc/xray/server.crt.prevbak 2>/dev/null || true
+    fi
+    if [ -f /etc/xray/server.key ]; then
+        cp -f /etc/xray/server.key /etc/xray/server.key.prevbak 2>/dev/null || true
+    fi
     service_manage stop xray 2>/dev/null || true
     sleep 1
     # 精确匹配进程名，避免误杀命令行中包含 xray 的无关进程
@@ -584,7 +703,9 @@ log "安装依赖..."
 case "$PKG_MANAGER" in
     apt)    ESSENTIALS=(curl unzip jq openssl nginx); OPTIONAL=(haveged) ;;
     dnf|yum)
-        [[ "$DISTRO_ID" =~ ^(centos|rhel|almalinux|rocky|anolis|alinux|openEuler|euleros|virtuozzo|ol)$ ]] && $PKG_MANAGER install -y -q epel-release 2>/dev/null || true
+        if [[ "$DISTRO_ID" =~ ^(centos|rhel|almalinux|rocky|anolis|alinux|openEuler|euleros|virtuozzo|ol)$ ]]; then
+            $PKG_MANAGER install -y -q epel-release 2>/dev/null || true
+        fi
         ESSENTIALS=(curl unzip jq openssl nginx); OPTIONAL=(haveged) ;;
     *)      ESSENTIALS=(curl unzip jq openssl nginx); OPTIONAL=(haveged) ;;
 esac
@@ -709,6 +830,8 @@ net.ipv4.tcp_slow_start_after_idle=0
 fs.file-max=1048576
 
 # --- 安全加固 ---
+# 注意: rp_filter=1 为严格反向路径校验。单网卡 VPS 保持默认即可；
+#       多网卡/策略路由(非对称回程)环境可能导致断网，此类拓扑请改为 0 或 2(松散模式)
 net.ipv4.conf.all.rp_filter=1
 net.ipv4.conf.default.rp_filter=1
 net.ipv4.conf.all.accept_redirects=0
@@ -733,7 +856,15 @@ sed -i "s/__TCP_BUF_MAX__/${TCP_BUF_MAX}/g" /etc/sysctl.d/99-proxy-optimized.con
 sed -i "s/__QUEUE_SIZE__/${QUEUE_SIZE}/g" /etc/sysctl.d/99-proxy-optimized.conf
 sed -i "s/__BANDWIDTH__/${BANDWIDTH_MBPS}/g" /etc/sysctl.d/99-proxy-optimized.conf
 
-sysctl --system >/dev/null 2>&1 || true
+# fs.file-max 仅在当前值更小时才写入，避免在大内存机器上把已有的更高系统默认值调低
+CUR_FILE_MAX=$(sysctl -n fs.file-max 2>/dev/null || echo 0)
+if [[ "$CUR_FILE_MAX" =~ ^[0-9]+$ ]] && [ "$CUR_FILE_MAX" -ge 1048576 ]; then
+    sed -i '/^fs.file-max=/d' /etc/sysctl.d/99-proxy-optimized.conf
+fi
+
+if ! sysctl --system >/dev/null 2>&1; then
+    warn "部分 sysctl 参数应用失败（可手动执行 sysctl --system 查看详情，不影响部署）"
+fi
 
 # 验证 BBR 是否生效（内核 < 4.9 或 OpenVZ 可能不支持）
 if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
@@ -792,8 +923,7 @@ if [ "$XRAY_PREINSTALLED" -eq 1 ]; then
     fi
 else
     # 回滚时 Xray 卸载：GitHub 不可达时无法在线卸载，只能 warn 提示用户手动清理
-    # 用 bash tmpfile remove（不带 @）：file 成为 $0，remove 成为 $1，避免 bash -c 嵌套引号地狱
-    add_rollback "XRAY_RB_TMP=\$(mktemp 2>/dev/null || echo /tmp/xray-rb.\$\$.sh); if curl -fsSL '${XRAY_INSTALL_URL}' -o \"\$XRAY_RB_TMP\" 2>/dev/null && [ -s \"\$XRAY_RB_TMP\" ]; then bash \"\$XRAY_RB_TMP\" remove 2>/dev/null || echo '[WARN] Xray 回滚卸载脚本执行失败，请手动清理'; else echo '[WARN] 无法下载 Xray 卸载脚本（GitHub 不可达），请手动执行: bash -c \"\\\$(curl -fsSL ${XRAY_INSTALL_URL})\" @ remove'; fi; rm -f \"\$XRAY_RB_TMP\""
+    add_rollback "rollback_uninstall_xray"
 fi
 
 # Xray 安装脚本会自动启动服务，先停止它，等待我们生成配置后再启动
@@ -899,7 +1029,7 @@ SHORT_ID=$(openssl rand -hex 8 2>/dev/null || true)
 # 关闭管道，tr 继续写入收到 SIGPIPE(141)；在 set -e + pipefail 下该赋值失败会让脚本
 # 无任何报错静默退出并触发回滚。改用 openssl 定长输出，无管道截断问题；失败时回退到内核 UUID。
 SUB_PATH=$(openssl rand -hex 8 2>/dev/null || true)
-[ -z "$SUB_PATH" ] && SUB_PATH=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -dc 'a-f0-9' | head -c 16 || true)
+[ -z "$SUB_PATH" ] && SUB_PATH=$(tr -dc 'a-f0-9' < /proc/sys/kernel/random/uuid 2>/dev/null | head -c 16 || true)
 [ -z "$SUB_PATH" ] && error "订阅路径生成失败"
 
 # 询问是否自定义订阅显示名称（客户端导入后显示的名称，来自 Content-Disposition filename）
@@ -936,23 +1066,10 @@ fi
 # 仍失败则恢复默认并告警（可能是服务器出网受限，客户端侧未必不可用），不阻断部署
 # ============================================
 check_reality_dest() {
-    local domain="$1" out tmp pid killer
-    if command -v timeout &>/dev/null; then
-        # 单次连接同时验证 TLS1.3 + h2 + X25519，减少对目标服务器的请求
-        out=$(timeout 12 openssl s_client -connect "${domain}:443" -servername "${domain}" -tls1_3 -alpn h2 -curves X25519 </dev/null 2>/dev/null || true)
-    else
-        # 无 timeout 命令（极端精简系统）时用后台进程 + 定时 kill 兜底，避免对不可达目标无限挂起
-        tmp="/tmp/reality-check.$$"
-        rm -f "$tmp"
-        { openssl s_client -connect "${domain}:443" -servername "${domain}" -tls1_3 -alpn h2 -curves X25519 </dev/null 2>/dev/null >"$tmp"; } &
-        pid=$!
-        ( sleep 12; kill "$pid" 2>/dev/null || true ) &
-        killer=$!
-        wait "$pid" 2>/dev/null || true
-        kill "$killer" 2>/dev/null || true
-        out=$(cat "$tmp" 2>/dev/null || true)
-        rm -f "$tmp"
-    fi
+    local domain="$1" out
+    # 调用方已确保 timeout 可用（六大发行版家族标配，Alpine 由 BusyBox 提供）。
+    # 单次连接同时验证 TLS1.3 + h2 + X25519，减少对目标服务器的请求
+    out=$(timeout 12 openssl s_client -connect "${domain}:443" -servername "${domain}" -tls1_3 -alpn h2 -curves X25519 </dev/null 2>/dev/null || true)
     echo "$out" | grep -q "ALPN protocol: h2" && \
     echo "$out" | grep -q "TLSv1.3" && \
     # OpenSSL 1.1.1 输出 "Server Temp Key: X25519"，3.x 输出 "Server Temp Key: ECDH, X25519, ..."
@@ -960,31 +1077,42 @@ check_reality_dest() {
 }
 
 log "预检 Reality 伪装目标 (TLS1.3 + h2 + X25519)..."
+# 记录主条目原始 Reality 端口：兜底替换域名时必须沿用该端口而非写死 443，
+# 否则用户自定义端口会被静默丢弃，且替换后的端口从未经过第 3 步的冲突检测
+REALITY_PORT_PRIMARY="$(cut -d'|' -f2 <<<"${REALITY_CDNS[0]:-}|443|")"
+case "${REALITY_PORT_PRIMARY}" in ''|*[!0-9]*) REALITY_PORT_PRIMARY=443 ;; esac
 OK_CDNS=()
-for entry in "${REALITY_CDNS[@]}"; do
-    _d="${entry%%|*}"
-    if check_reality_dest "$_d"; then
-        log "  ${_d}: 可用"
-        OK_CDNS+=("$entry")
-    else
-        warn "  ${_d}: 不可用，已剔除（不支持 h2/TLS1.3/X25519 或无法访问）"
-    fi
-done
+if command -v timeout &>/dev/null; then
+    for entry in "${REALITY_CDNS[@]}"; do
+        _d="${entry%%|*}"
+        if check_reality_dest "$_d"; then
+            log "  ${_d}: 可用"
+            OK_CDNS+=("$entry")
+        else
+            warn "  ${_d}: 不可用，已剔除（不支持 h2/TLS1.3/X25519 或无法访问）"
+        fi
+    done
+else
+    # 预检属咨询性步骤（全失败也继续部署），缺 timeout 时跳过比引入后台 killer 进程更稳，
+    # 也避免无超时的 openssl s_client 对不可达目标无限挂起
+    warn "缺少 timeout 命令，跳过伪装目标预检（不影响部署继续）"
+fi
 REALITY_CDNS=("${OK_CDNS[@]}")
 
-if [ ${#REALITY_CDNS[@]} -eq 0 ]; then
+if [ ${#REALITY_CDNS[@]} -eq 0 ] && command -v timeout &>/dev/null; then
     for fb in "${DEST_FALLBACKS[@]}"; do
-        _d="${fb%%|*}"; _t="${fb#*|}"
-        if check_reality_dest "$_d"; then
-            warn "主伪装目标不可用，自动替换为: ${_d}"
-            REALITY_CDNS=("${_d}|443|${_t}")
+        _fb_d="${fb%%|*}"; _fb_t="${fb##*|}"
+        if check_reality_dest "$_fb_d"; then
+            warn "主伪装目标不可用，自动替换为: ${_fb_d}:${REALITY_PORT_PRIMARY}"
+            REALITY_CDNS=("${_fb_d}|${REALITY_PORT_PRIMARY}|${_fb_t}")
             break
         fi
     done
 fi
 if [ ${#REALITY_CDNS[@]} -eq 0 ]; then
     warn "所有伪装目标均不可用（可能是服务器出网受限），继续部署，但 Reality 节点可能无法握手"
-    REALITY_CDNS=("${DEST_FALLBACKS[0]%%|*}|443|${DEST_FALLBACKS[0]#*|}")
+    _fb_d="${DEST_FALLBACKS[0]%%|*}"; _fb_t="${DEST_FALLBACKS[0]##*|}"
+    REALITY_CDNS=("${_fb_d}|${REALITY_PORT_PRIMARY}|${_fb_t}")
 fi
 rebuild_derived_vars
 
@@ -1232,6 +1360,13 @@ ${REALITY_INBOUNDS},
     }
 }
 EOF
+# config.json 含 UUID 与 privateKey，禁止其他本地用户读取（同时保持 xray 运行用户可读）
+if [ "$XRAY_USER" != "root" ]; then
+    chown "$XRAY_USER:$XRAY_GROUP" /usr/local/etc/xray/config.json 2>/dev/null || true
+    chmod 640 /usr/local/etc/xray/config.json
+else
+    chmod 600 /usr/local/etc/xray/config.json
+fi
 add_rollback "rm -f /usr/local/etc/xray/config.json"
 
 # JSON 合法性即时校验；语义预检（xray run -test）移到证书生成之后，
@@ -1285,10 +1420,14 @@ fi
 add_rollback "rm -f /etc/xray/server.crt /etc/xray/server.key"
 
 # 配置语义预检放在证书生成之后：xray run -test 会真实加载 TLS 入站引用的证书文件
-if ! xray run -test -config /usr/local/etc/xray/config.json >/tmp/xray-test.log 2>&1; then
-    cat /tmp/xray-test.log
+# 预检日志用 mktemp，避免 /tmp 固定文件名的符号链接攻击面
+XRAY_TEST_LOG=$(mktemp 2>/dev/null || echo "/tmp/xray-test.$$.log")
+if ! xray run -test -config /usr/local/etc/xray/config.json >"$XRAY_TEST_LOG" 2>&1; then
+    cat "$XRAY_TEST_LOG"
+    rm -f "$XRAY_TEST_LOG"
     error "Xray 配置预检失败，已中止（详见上方输出）"
 fi
+rm -f "$XRAY_TEST_LOG"
 log "Xray 配置预检通过"
 
 # ============================================
@@ -1705,8 +1844,21 @@ LIMIT_REQ_TEST="$NGINX_CONF_DIR/limit_req_test_$$.conf"
 # 清理历史失败运行遗留的测试文件（非点文件名会被 *.conf 通配 include，
 # 残留文件在未编译 limit_req 模块的 nginx 上会使后续 nginx -t 永久失败）
 rm -f "$NGINX_CONF_DIR"/limit_req_test_*.conf
+# shellcheck disable=SC2016  # $binary_remote_addr 是 nginx 变量，必须保持字面量
 echo 'limit_req_zone $binary_remote_addr zone=_proxy_limit_req_test:1m rate=1r/s;' > "$LIMIT_REQ_TEST"
-if nginx -t >/dev/null 2>&1; then
+# 仅凭 "unknown directive" 判定模块缺失：nginx -t 整体失败也可能由用户其他配置的无关错误引起，
+# 若按退出码判定会误判为无模块而静默放弃订阅限速（LC_ALL=C 保证错误文案稳定）
+# 三态判定：模块缺失 / 模块可用但有其他配置告警（打印根因）/ 完全通过
+LIMIT_REQ_TEST_ERR=$(nginx -t 2>&1 >/dev/null || true)
+if echo "$LIMIT_REQ_TEST_ERR" | grep -q 'unknown directive "limit_req_zone"'; then
+    NGINX_HAS_LIMIT_REQ=0
+elif [ -n "$LIMIT_REQ_TEST_ERR" ]; then
+    NGINX_HAS_LIMIT_REQ=1
+    # 此前探测输出被吞进变量只做 grep，用户有其他坏配置时根因第一环不可见；
+    # 如实打印，避免最终 nginx -t 失败时被误导性的端口占用结论带偏排查方向
+    warn "nginx -t 探测发现与本脚本无关的配置问题（原始输出如下，最终测试仍会校验）："
+    printf '%s\n' "$LIMIT_REQ_TEST_ERR"
+else
     NGINX_HAS_LIMIT_REQ=1
 fi
 rm -f "$LIMIT_REQ_TEST"
@@ -1861,10 +2013,12 @@ SUB_PORT="${SUB_PORT}"
 SUB_PATH="${SUB_PATH}"
 NGINX_DEFAULT_SYMLINK="${NGINX_DEFAULT_SYMLINK:-0}"
 ENVEOF
+# env 含 SUB_PATH（订阅唯一路径，等同访问凭据），禁止其他用户读取
+chmod 600 /etc/proxy-manager.env
 
 cat > /usr/local/bin/proxy-manager << 'MGRSCRIPT'
 #!/bin/bash
-# Xray Proxy Manager v4.5.5
+# Xray Proxy Manager v4.5.7
 # https://github.com/Evergreen05/xray-proxy-install
 
 RED='\033[0;31m'
@@ -1925,9 +2079,21 @@ is_service_active() {
     fi
 }
 
+# 获取公网 IP（多源容错，与 install.sh 源列表保持一致）
+get_server_ip() {
+    local src resp ip=""
+    for src in ifconfig.me ipinfo.io/ip ip.sb icanhazip.com; do
+        resp=$(curl -s4 --connect-timeout 5 --max-time 10 "https://${src}" 2>/dev/null || true)
+        ip=$(echo "$resp" | grep -Eo '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+        [ -n "$ip" ] && break
+    done
+    [ -z "$ip" ] && ip="unknown"
+    echo "$ip"
+}
+
 show_info() {
-    SERVER_IP=$(curl -s4 --connect-timeout 5 --max-time 10 ifconfig.me 2>/dev/null || curl -s4 --connect-timeout 5 --max-time 10 ip.sb 2>/dev/null || echo "unknown")
-    UUID=$(cat /usr/local/etc/xray/config.json 2>/dev/null | jq -r '.inbounds[0].settings.clients[0].id' 2>/dev/null || echo "unknown")
+    SERVER_IP=$(get_server_ip)
+    UUID=$(jq -r '.inbounds[0].settings.clients[0].id' /usr/local/etc/xray/config.json 2>/dev/null || echo "unknown")
 
     NGINX_CONF=""
     for conf in "$NGINX_CONF_DIR/proxy-sub.conf" /etc/nginx/http.d/proxy-sub.conf /etc/nginx/sites-available/proxy-sub-secure; do
@@ -1938,7 +2104,7 @@ show_info() {
     SUB_PORT=${SUB_PORT:-$(sed -n 's/.*listen \([0-9]*\).*/\1/p' "$NGINX_CONF" 2>/dev/null | head -1)}
     SUB_PATH=${SUB_PATH:-$(sed -n 's/.*location = \/\([a-zA-Z0-9_-]*\).*/\1/p' "$NGINX_CONF" 2>/dev/null | head -1)}
 
-    PRIVATE_KEY=$(cat /usr/local/etc/xray/config.json 2>/dev/null | jq -r '.inbounds[0].streamSettings.realitySettings.privateKey' 2>/dev/null)
+    PRIVATE_KEY=$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey' /usr/local/etc/xray/config.json 2>/dev/null)
     if [ -n "$PRIVATE_KEY" ] && [ "$PRIVATE_KEY" != "null" ]; then
         PUB_OUT=$(xray x25519 -i "$PRIVATE_KEY" 2>&1 || true)
         PUBLIC_KEY=$(echo "$PUB_OUT" | grep -iE '(public|公钥).*(key|密钥)' | sed -n 's/.*:[[:space:]]*//p' | tr -d '\r' | tr -d '[:space:]' | head -1)
@@ -2012,7 +2178,8 @@ get_sub_url() {
     local port path ip
     port=$(sed -n 's/.*listen \([0-9]*\).*/\1/p' "$conf" 2>/dev/null | head -1)
     path=$(sed -n 's/.*location = \/\([a-zA-Z0-9_-]*\).*/\1/p' "$conf" 2>/dev/null | head -1)
-    ip=$(curl -s4 --connect-timeout 5 --max-time 10 ifconfig.me 2>/dev/null || curl -s4 --connect-timeout 5 --max-time 10 ip.sb 2>/dev/null || echo "<服务器IP>")
+    ip=$(get_server_ip)
+    [ "$ip" = "unknown" ] && ip="<服务器IP>"
     if [ -n "$port" ] && [ -n "$path" ]; then
         echo -e "${GREEN}Clash 订阅 (Clash Meta / v2rayN 6.x+):${NC}"
         echo "  http://${ip}:${port}/${path}"
@@ -2075,7 +2242,7 @@ case "$1" in
         ;;
     config)
         echo -e "${GREEN}Xray 配置:${NC}"
-        cat /usr/local/etc/xray/config.json | jq .
+        jq . /usr/local/etc/xray/config.json
         ;;
     rules)
         RULES_PATH="${WEB_ROOT:-/usr/share/nginx/html}/clash.yaml"
@@ -2118,8 +2285,9 @@ case "$1" in
         rm -f /etc/nginx/sites-available/proxy-sub-secure
         rm -f /etc/nginx/sites-enabled/proxy-sub-secure
         # 恢复安装时被重命名禁用的发行版默认 vhost（如有）
-        # http.d 显式列出：env 丢失时 NGINX_CONF_DIR 回退 conf.d，Alpine 上不会被覆盖
-        for f in "$NGINX_CONF_DIR/default.conf" /etc/nginx/http.d/default.conf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default; do
+        # 清单与安装时 DEFAULT_VHOSTS 对齐：显式列出 conf.d/default.conf，
+        # 避免 env 丢失导致 NGINX_CONF_DIR 回退 http.d 时漏恢复
+        for f in "$NGINX_CONF_DIR/default.conf" /etc/nginx/conf.d/default.conf /etc/nginx/http.d/default.conf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default; do
             if [ -e "${f}.disabled-by-proxy" ] || [ -L "${f}.disabled-by-proxy" ]; then
                 mv -f "${f}.disabled-by-proxy" "$f" 2>/dev/null || true
             fi
@@ -2165,10 +2333,15 @@ case "$1" in
         sysctl --system >/dev/null 2>&1 || true
         # 恢复配置后重启 nginx，使默认 vhost 恢复生效、订阅端点移除
         service_manage restart nginx 2>/dev/null || true
+        echo -e "${YELLOW}提示: 内核优化参数已从配置文件移除，已加载到内存的值将在重启后完全恢复${NC}"
+        if [ -f /swapfile ]; then
+            echo -e "${YELLOW}提示: 本脚本创建的 Swap（/swapfile 及 fstab 对应行）属系统级增强，卸载代理时有意保留；"
+            echo -e "如需移除请手动执行 swapoff /swapfile、rm -f /swapfile 并删除 fstab 对应行${NC}"
+        fi
         echo -e "${GREEN}卸载完成${NC}"
         ;;
     *)
-        echo -e "${BLUE}Xray Proxy Manager v4.5.5${NC}"
+        echo -e "${BLUE}Xray Proxy Manager v4.5.7${NC}"
         echo -e "GitHub: https://github.com/Evergreen05/xray-proxy-install"
         echo ""
         echo "用法: proxy-manager <命令>"
@@ -2197,16 +2370,24 @@ add_rollback "rm -f /usr/local/bin/proxy-manager"
 # ============================================
 step "防火墙放行与健康检查"
 
+FIREWALLD_PENDING_RELOAD=0
 open_firewall_port() {
     local port=$1 opened=0
     # ufw (Debian/Ubuntu)：已启用时优先
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw allow "$port/tcp" >/dev/null 2>&1 && { log "ufw: 放行 ${port}"; opened=1; }
     fi
-    # firewalld (RHEL/CentOS/Fedora)：仅在服务实际运行时尝试
+    # firewalld (RHEL/CentOS/Fedora)：仅在服务实际运行时尝试。
+    # 只做 permanent 登记，--reload 统一移到循环后单次执行（避免 N 个端口 N 次重载）
     if [ "$opened" -eq 0 ] && command -v firewall-cmd &>/dev/null; then
         if systemctl is-active --quiet firewalld 2>/dev/null || service firewalld status >/dev/null 2>&1; then
-            firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 && { log "firewalld: 放行 ${port}"; opened=1; }
+            if firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1; then
+                log "firewalld: 登记放行 ${port}"
+                FIREWALLD_PENDING_RELOAD=1
+                opened=1
+            else
+                warn "firewalld: 登记放行 ${port} 失败（将尝试 iptables 兜底）"
+            fi
         fi
     fi
     # iptables 通用回退（含规则持久化）
@@ -2230,20 +2411,32 @@ for port in "${PROXY_PORTS[@]}" "$SUB_PORT"; do
     open_firewall_port "$port"
 done
 
+# firewalld 登记的规则统一生效（单次 reload）
+if [ "$FIREWALLD_PENDING_RELOAD" -eq 1 ]; then
+    if firewall-cmd --reload >/dev/null 2>&1; then
+        log "firewalld: 规则已统一生效"
+    else
+        warn "firewalld reload 失败，请手动执行: firewall-cmd --reload"
+    fi
+fi
+
 HEALTH_OK=1
-is_service_active xray && log "Xray: 运行中" || { warn "Xray: 未运行"; HEALTH_OK=0; }
-is_service_active nginx && log "Nginx: 运行中" || { warn "Nginx: 未运行"; HEALTH_OK=0; }
+if is_service_active xray; then log "Xray: 运行中"; else warn "Xray: 未运行"; HEALTH_OK=0; fi
+if is_service_active nginx; then log "Nginx: 运行中"; else warn "Nginx: 未运行"; HEALTH_OK=0; fi
 for port in "${PROXY_PORTS[@]}"; do
-    check_port "$port" && log "端口 ${port}: 正常" || { warn "端口 ${port}: 未监听"; HEALTH_OK=0; }
+    if check_port "$port"; then log "端口 ${port}: 正常"; else warn "端口 ${port}: 未监听"; HEALTH_OK=0; fi
 done
-SUB_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${SUB_PORT}/${SUB_PATH}" 2>/dev/null || echo "000")
+# curl 连接失败时自身已输出 000 且退出码非 0，不可再 || echo "000"（会拼接成 000000）
+SUB_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${SUB_PORT}/${SUB_PATH}" 2>/dev/null || true)
+SUB_HTTP_CODE=${SUB_HTTP_CODE:-000}
 if [ "$SUB_HTTP_CODE" = "200" ]; then
     log "订阅端点 (Clash): 可访问"
 else
     warn "订阅端点 (Clash): HTTP ${SUB_HTTP_CODE}（不可访问）"
     HEALTH_OK=0
 fi
-VLESS_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${SUB_PORT}/${SUB_PATH}-vless" 2>/dev/null || echo "000")
+VLESS_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${SUB_PORT}/${SUB_PATH}-vless" 2>/dev/null || true)
+VLESS_HTTP_CODE=${VLESS_HTTP_CODE:-000}
 if [ "$VLESS_HTTP_CODE" = "200" ]; then
     log "订阅端点 (VLESS): 可访问"
 else
